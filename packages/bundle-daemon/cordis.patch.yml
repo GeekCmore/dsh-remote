@@ -1,0 +1,43 @@
+# @dsh-remote/bundle-daemon — dsh profile bundle layer ("daemon mode", frontend side).
+#
+# Attaches the LOCAL dsh to sessions running inside a headless dsh on a remote
+# Linux host (tmux-style attach/detach). The remote side runs the
+# @dsh-remote/remote-backend plugin (installed via `dsh-remote-backend init`,
+# which issues the pairing token); this bundle is the local half.
+#
+# Unlike bundle-live this layer keeps the local execution world untouched —
+# it only ADDS the remote control services. The daemon channel rides a
+# dedicated SSH exec process (`dsh-remote-backend serve`, stdio JSON-RPC with
+# an HMAC pairing handshake); no TCP port is ever opened on the remote host.
+
+- insert:
+    # Connection owner (ssh2). Each daemon target must carry a
+    # `pairingTokenRef`; the shipped default resolves it as the name of an
+    # environment variable holding the pairing token (see remote-daemon
+    # below). Restate this row's WHOLE config in your profile
+    # cordis.patch.yml to pin real hosts — patching replaces, never merges.
+    - id: remote-ssh
+      name: '@dsh-remote/remote-ssh'
+      config:
+        targets:
+          - id: default
+            pairingTokenRef: DSH_REMOTE_TOKEN
+            ssh:
+              host: !!js "process.env.DSH_REMOTE_HOST ?? 'localhost'"
+              port: !!js "Number(process.env.DSH_REMOTE_PORT ?? 22)"
+              username: !!js "process.env.DSH_REMOTE_USER ?? process.env.USER ?? 'root'"
+              auth: { type: agent }
+
+    # ctx.remoteSessions: session list/attach/prompt/cancel/fork over the
+    # daemon protocol, with exclusive-write leases and seq-cursor resume.
+    # `!!js` evaluates against the entry's cordis context.
+    - id: remote-daemon
+      name: '@dsh-remote/remote-daemon'
+      config:
+        resolveToken: !!js "async (ref) => { const token = process.env[ref]; if (!token) throw new Error(`pairing token env var not set: ${ref}`); return token; }"
+
+    # ctx.remoteTransfer (local<->remote copy + preview), ctx.remoteMonitor
+    # (periodic read-only probes), and the remote_copy model tool. Defaults
+    # resolve ctx.remoteHub per target; no config needed.
+    - id: remote-frontend
+      name: '@dsh-remote/remote-frontend'

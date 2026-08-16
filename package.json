@@ -1,0 +1,19 @@
+{
+  "name": "dsh-remote",
+  "version": "0.0.0",
+  "private": true,
+  "description": "SSH remote-control plugins for DeepSeek Harness (dsh): live-mode fs/subprocess providers and daemon-mode session attach",
+  "type": "module",
+  "packageManager": "pnpm@11.7.0",
+  "scripts": {
+    "build": "pnpm -r build",
+    "test": "pnpm -r test",
+    "typecheck": "pnpm -r typecheck",
+    "smoke:dsh-host": "bash e2e/dsh-host/run-smoke.sh"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "typescript": "^5.9.0",
+    "vitest": "^3.2.0"
+  }
+}

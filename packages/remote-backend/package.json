@@ -1,0 +1,37 @@
+{
+  "name": "@dsh-remote/backend",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Daemon-mode remote backend for dsh-remote: Cordis plugin mounted into a headless remote dsh, speaking the dsh-remote JSON-RPC protocol over stdio",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "bin": {
+    "dsh-remote-backend": "./dist/bin.js"
+  },
+  "files": ["dist"],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.test.json",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@dsh-remote/core": "workspace:*",
+    "@dsh-remote/seams": "workspace:*"
+  },
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "^4.0.1"
+  },
+  "devDependencies": {
+    "@deepseek-ai/cordis": "^4.0.1",
+    "@types/node": "^24.0.0",
+    "typescript": "^5.9.0",
+    "vitest": "^3.2.0"
+  }
+}

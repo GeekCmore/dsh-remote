@@ -1,0 +1,34 @@
+# dsh-host smoke overlay (applied after the profile layer via `dsh --patch`).
+#
+# An id-targeted patch cannot rewrite a row's `name` (the include machinery
+# rejects name mismatches), so swapping a provider means: disable the original
+# row, insert ours. Service identity is what counts — exactly one enabled row
+# provides `ctx.fs` / `ctx.subprocess`.
+#
+# `target: main` refers to the hub target the smoke plugin registers from
+# DSH_TEST_SSH_* at runtime.
+
+- id: fs-sandbox
+  disabled: true
+
+- id: subprocess
+  disabled: true
+
+- insert:
+    - id: remote-hub
+      name: '@dsh-remote/remote-ssh'
+
+    - id: fs-ssh
+      name: '@dsh-remote/fs-ssh'
+      config:
+        target: main
+
+    - id: subprocess-ssh
+      name: '@dsh-remote/subprocess-ssh'
+      config:
+        target: main
+
+    # Relative specifier: resolves beside the profile root config, i.e. inside
+    # the profile directory (run-smoke.sh copies smoke-plugin.mjs there).
+    - id: dsh-remote-smoke
+      name: './smoke-plugin.mjs'

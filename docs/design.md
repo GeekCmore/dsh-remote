@@ -1,0 +1,128 @@
+# dsh-remote design (final)
+
+SSH remote control for [DeepSeek Harness (dsh)](https://github.com/deepseek-ai/deepseek-harness),
+transparent to all frontends (CLI/TUI/GUI/SDK). This document condenses the
+settled design; per-package behavior lives in each package's source and tests.
+
+## Two modes
+
+The official dsh remote-execution route is *replacing capability-seam
+providers as an environment-consistent group* (the `fs-e2b`/`subprocess-e2b`
+POC is the template), not adding a network backend to the sandbox. We follow
+it with two modes that share one protocol core:
+
+- **live mode** — the dsh host process stays local (session log, agent loop,
+  approvals, LLM calls all local); only the *execution world* (`ctx.fs` +
+  `ctx.subprocess`) points at the remote host. **Agentless**: SFTP + exec
+  channels + a remote bash wrapper; nothing installed remotely. A dropped
+  connection surfaces as typed errors (`CONN_LOST`) that abort the turn
+  cleanly.
+- **daemon mode** — a full headless dsh runs on the remote host and owns the
+  sessions; local frontends are remote controls (attach/detach, tmux-style).
+  Local process exit never interrupts a remote session.
+
+Transport decision: **option A (hybrid)** — live mode is agentless, daemon
+mode alone deploys `remote-backend`. (Rejected: option B, one backend for
+both modes — it would force Node + backend installation on every target,
+defeating live mode's zero-deployment goal.)
+
+## Package structure
+
+| Package | Side | Role | ctx key |
+|---|---|---|---|
+| `remote-core` | shared | Wire vocabulary: newline JSON-RPC 2.0, channel mux, base64 data framing, error codes, pairing auth | library, none |
+| `seams` | frontend | Vendored upstream seam definitions (`ctx.fs`, `ctx.subprocess`), MIT-adapted for standalone compilation | declares `fs`, `subprocess` |
+| `remote` | frontend | Connection-owner definition + transport SPI | declares `remoteHub` |
+| `remote-ssh` | frontend | ssh2 implementation: `SshTransport` + `SshRemoteHub` | provides `remoteHub` |
+| `fs-ssh` | frontend | fs seam over SFTP + exec | provides `fs` |
+| `subprocess-ssh` | frontend | subprocess seam over exec wrapper + PTY | provides `subprocess` |
+| `remote-sessions` | frontend | Daemon-mode session vocabulary + handle façade | declares `remoteSessions` |
+| `remote-daemon` | frontend | `remoteSessions` over the daemon protocol | provides `remoteSessions` |
+| `remote-frontend` | frontend | Transfer/preview, monitor, `remote_copy` tool | provides `remoteTransfer`, `remoteMonitor` |
+| `remote-backend` | backend | Daemon-side plugin: broker, approval bridge, lease, monitor, transfer | runs in the remote headless dsh |
+| `bundle-live` / `bundle-daemon` | profile | dsh profile bundles (`dsh.bundle` patch) | composition only |
+
+`ctx.remoteHub` mirrors the `ctx.e2b` pattern: one service owns the
+connection, runtime root (`$HOME/.cache/dsh-remote/<hex>`, mode `0700`), and
+lifecycle events (`remote/connected|disconnected|degraded`); the seam
+providers consume it lazily and never open their own connections.
+
+## live mode mechanics
+
+- **fs-ssh**: SFTP for stat/list/read/write streams; exec for what SFTP
+  cannot express — `realpath -mz` canonical identity (cached, 5s TTL),
+  atomic publish (random 0700 sibling staging dir + same-directory rename;
+  `createIfAbsent` via `ln -T`; version/existence guards re-checked inside
+  one remote critical section, so check+publish is a single round trip).
+- **subprocess-ssh**: remote bash wrapper — `setsid` process groups, real
+  PGID published through private state files (handles never trust the exec
+  process model; PID is async, `pid = -1` until published), bounded spill
+  files with base64 line framing, TERM→grace→KILL escalation by process
+  group, PTY via ssh2 `pty-req` (rows/cols/TERM negotiated from the spawn
+  spec), foreground-group inspection via procps `ps`.
+- **Transparency boundary**: LLM calls, session logs, approvals
+  (`approval/request` stays on the local host), workspace registry — all
+  untouched. Replacing `ctx.fs` + `ctx.subprocess` transparently remote-izes
+  bash, terminal, jobs, LSP, and subagent consumers.
+
+## daemon mode: protocol, handshake, lease
+
+The daemon channel is an SSH **exec process** running
+`dsh-remote-backend serve`; newline-framed JSON-RPC 2.0 (sdk/protocol
+vocabulary) rides its stdio. No TCP listener — the attack surface is SSH
+itself.
+
+**Pairing authentication** (inside `hello`, on top of SSH auth):
+
+1. F→B `hello`: protocol version, capabilities, client nonce.
+2. B→F `hello.challenge`: server nonce.
+3. F→B `hello.proof`: `HMAC-SHA256(token, clientNonce ‖ serverNonce ‖ hello)` —
+   the token never goes on the wire; challenge-response defeats replay.
+4. Failure → `REMOTE_AUTH_FAILED`, channel closed immediately, rate-limited.
+
+SSH authenticates machine access; the pairing token authenticates the
+frontend. One token may authorize many frontends; rotation is
+`dsh-remote-backend init --rotate-token` plus updating frontend credentials.
+The backend assigns the client id in the handshake — it is the only client
+identity on the wire (leases name it; nothing is self-chosen).
+
+**Exclusive write lease** (per session, in-memory, never persisted):
+
+- `session.attach { mode: 'read' | 'write', sinceSeq? }` — read always
+  succeeds (unlimited read concurrency, snapshot + live event fan-out);
+  write succeeds only when the lease is free, else `REMOTE_SESSION_LOCKED`
+  with the current holder's identity.
+- The lease is bound to the connection: disconnect releases it and
+  broadcasts `session.control-changed`; `session.control-release` demotes
+  voluntarily.
+- Preemption requires explicit `force: true` — never silent — and every
+  attached party can audit the change (`reason: 'preempted'`).
+- Backend restart clears all leases (first come, first served); sessions
+  themselves are persisted by the remote dsh and unaffected.
+
+**Resume**: `attach(sinceSeq = lastSeenSeq)` replays from the cursor after
+reconnect; subscribers re-attach automatically (duplicates dropped). The
+backend also bridges `approval/request` to the write frontend (broadcast to
+readers when no writer; fail-closed when nobody is attached), and serves
+monitor probes and transfer endpoints off the critical path.
+
+## Trade-offs (settled)
+
+| Scenario | Policy | Rationale |
+|---|---|---|
+| Multi-frontend, one target (live) | Independent SSH connection per frontend; no cross-connection race coordination | Same posture as e2b / everyday SSH |
+| Multi-frontend, one session (daemon) | Unlimited read + exclusive write lease, explicit-force preempt, auditable | One in-memory `sessionId→holder` table; clear semantics |
+| Pairing auth | HMAC challenge-response inside `hello`; token never on the wire | Two independent layers (SSH = machine, token = frontend) |
+| Cold-session resume concurrency | Per-sessionId dedupe inside the backend | Single-process serialization, no distributed lock |
+| Metadata/workspace writes | Serialized inside the backend (sole writer) | Natural mutual exclusion |
+| File version guards | Re-checked in one remote critical section | Effective per connection; cross-connection races out of scope |
+| Approval race | Write frontend first; otherwise first reader answer wins | Wired form of waterfall semantics |
+| Security | No TCP listener; SSH credentials and pairing token stored separately; host-key verification hook; runtime root 0700 | Same-UID remote processes can still read control state (acknowledged upstream for E2B too) |
+
+## Known gaps accepted for v1
+
+Synchronous-PID consumers (ACP subagents), remote bootstrap still manual
+(`REMOTE_NOT_BOOTSTRAPPED` detection + instructions, auto-bootstrap later),
+fs double round trip mitigated by resolve caching, backend/frontend protocol
+version drift handled by `hello` capability negotiation. See the root
+README's limitation list for the user-facing version.

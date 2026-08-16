@@ -1,0 +1,59 @@
+# @dsh-remote/bundle-live — dsh profile bundle layer ("live mode").
+#
+# Routes the execution world (ctx.fs / ctx.subprocess) of a LOCAL dsh session
+# to a remote Linux host over SSH. Agentless: the remote side needs nothing
+# but sshd, bash, coreutils and procps — no Node, no dsh, no daemon.
+#
+# Applied after @deepseek-ai/dsh-base in the profile's bundle stack. Patch
+# semantics (dsh profile composer): an id-targeted patch replaces the row's
+# whole `config`/flags but CANNOT change the row's plugin `name` (a `name`
+# mismatch skips the patch with a warning), so swapping a provider means
+# disabling the base row and inserting a new one. `!!js` expressions evaluate
+# against the entry's cordis context, so the closures below read the
+# `remoteHub` service lazily at call time (reconnects are picked up).
+
+# dsh-base row `fs-sandbox` (@deepseek-ai/dsh-fs-sandbox): the sandboxed local
+# ctx.fs backend. Disabled; fs-ssh takes over the `fs` service. Note the local
+# sandbox policy no longer wraps file mutations — permission semantics on the
+# remote host are the SSH account's own.
+- id: fs-sandbox
+  name: '@deepseek-ai/dsh-fs-sandbox'
+  disabled: true
+
+# dsh-base row `subprocess` (@deepseek-ai/dsh-subprocess-local): the local
+# ctx.subprocess backend. Disabled; subprocess-ssh takes over the service.
+- id: subprocess
+  name: '@deepseek-ai/dsh-subprocess-local'
+  disabled: true
+
+- insert:
+    # Connection owner: one ssh2 connection per target, handed out to the
+    # providers below. The shipped default target reads its address from the
+    # environment; restate this row's WHOLE config in your profile
+    # cordis.patch.yml to pin real hosts (patching replaces, never merges).
+    # If you rename the target id, also restate the fs-ssh/subprocess-ssh
+    # rows — their closures reference the id 'default'.
+    - id: remote-ssh
+      name: '@dsh-remote/remote-ssh'
+      config:
+        autoConnect: true
+        targets:
+          - id: default
+            ssh:
+              host: !!js "process.env.DSH_REMOTE_HOST ?? 'localhost'"
+              port: !!js "Number(process.env.DSH_REMOTE_PORT ?? 22)"
+              username: !!js "process.env.DSH_REMOTE_USER ?? process.env.USER ?? 'root'"
+              auth: { type: agent }
+
+    # ctx.fs over SFTP + exec (fs seam, 12 primitives; replaces fs-sandbox).
+    - id: fs-ssh
+      name: '@dsh-remote/fs-ssh'
+      config:
+        getTransport: !!js "() => remoteHub.get('default')"
+
+    # ctx.subprocess over exec wrapper + PTY (replaces subprocess-local).
+    - id: subprocess-ssh
+      name: '@dsh-remote/subprocess-ssh'
+      config:
+        getTransport: !!js "() => remoteHub.get('default')"
+        runtimeRoot: !!js "() => remoteHub.runtimeRoot('default')"

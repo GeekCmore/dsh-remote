@@ -1,0 +1,11 @@
+node_modules/
+dist/
+*.tgz
+coverage/
+
+# integration test keypairs (private keys must never be committed)
+integration/.keys/
+
+# e2e smoke caches and packed artifacts
+e2e/dsh-host/.cache/
+e2e/dsh-host/vendor/

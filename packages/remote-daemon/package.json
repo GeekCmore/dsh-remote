@@ -1,0 +1,39 @@
+{
+  "name": "@dsh-remote/remote-daemon",
+  "version": "0.0.0",
+  "private": true,
+  "description": "ctx.remoteSessions provider speaking the dsh-remote daemon protocol over an SSH exec channel — daemon-mode frontend",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@dsh-remote/core": "workspace:*",
+    "@dsh-remote/remote": "workspace:*",
+    "@dsh-remote/seams": "workspace:*",
+    "@dsh-remote/sessions": "workspace:*"
+  },
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "^4.0.1"
+  },
+  "devDependencies": {
+    "@deepseek-ai/cordis": "^4.0.1",
+    "@dsh-remote/backend": "workspace:*",
+    "@types/node": "^24.0.0",
+    "typescript": "^5.9.0",
+    "vitest": "^3.2.0"
+  }
+}
