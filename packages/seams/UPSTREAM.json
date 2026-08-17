@@ -1,0 +1,50 @@
+{
+  "repository": "deepseek-ai/deepseek-harness",
+  "version": "0.1.0-rc.5",
+  "commit": "abe560f81edebe5f6a5b62706ff502daa0dccd40",
+  "note": "Single source of truth for the vendored seam pin. `commit` is the upstream release(dsh) commit for `version`; scripts/verify-contract.mjs fetches the upstream files at that commit and compares them against the vendored copies modulo the adaptations listed here (plus the vendored header comment). rc.6 note: 0.1.0-rc.6 was npm-published from an unpushed commit; its compiled lib output was diffed against these sources on 2026-08-16 and carries no seam drift.",
+  "files": [
+    {
+      "local": "src/fs.ts",
+      "upstream": "packages/fs/fs/src/index.ts",
+      "adapt": [
+        ["@deepseek-ai/dsh-sandbox", "./sandbox.js"],
+        ["./types.ts", "./fs-types.js"]
+      ]
+    },
+    {
+      "local": "src/fs-types.ts",
+      "upstream": "packages/fs/fs/src/types.ts",
+      "adapt": []
+    },
+    {
+      "local": "src/subprocess.ts",
+      "upstream": "packages/subprocess/subprocess/src/index.ts",
+      "adapt": [
+        ["./types.ts", "./subprocess-types.js"]
+      ]
+    },
+    {
+      "local": "src/subprocess-types.ts",
+      "upstream": "packages/subprocess/subprocess/src/types.ts",
+      "adapt": []
+    },
+    {
+      "local": "src/session-json.ts",
+      "upstream": "packages/core/session/src/json.ts",
+      "adapt": []
+    },
+    {
+      "local": "src/session-types.ts",
+      "upstream": "packages/core/session/src/types.ts",
+      "adapt": [
+        ["./json.ts", "./session-json.js"]
+      ]
+    },
+    {
+      "local": "src/sandbox.ts",
+      "upstream": "packages/sandbox/sandbox/src/index.ts",
+      "shim": "Type-only subset: every exported declaration must be covered by the upstream source (interfaces member-wise; upstream may carry extra members such as SandboxExecutionPolicy.sessionId)."
+    }
+  ]
+}

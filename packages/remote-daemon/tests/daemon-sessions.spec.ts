@@ -6,7 +6,7 @@
  */
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { Context } from '@deepseek-ai/cordis';
-import type { ControlChangeReason } from '@dsh-remote/core';
+import type { ApprovalRequestParams, ControlChangeReason, QuestionRequestParams } from '@dsh-remote/core';
 import type { RemoteAgentHandle, RemoteAgentStatus } from '@dsh-remote/sessions';
 import type { SessionEvent } from '@dsh-remote/seams';
 import { DaemonRemoteSessions } from '../src/index.js';
@@ -29,12 +29,18 @@ async function setup(
   opts: {
     token?: string;
     withPairingRef?: boolean;
+    capabilities?: string[];
     reconnect?: { initialDelayMs?: number; maxDelayMs?: number; maxAttempts?: number };
     broker?: FakeBackendBroker;
   } = {},
 ): Promise<Setup> {
   const ctx = new Context();
-  const broker = opts.broker ?? new FakeBackendBroker({ token: TOKEN });
+  const broker =
+    opts.broker ??
+    new FakeBackendBroker({
+      token: TOKEN,
+      ...(opts.capabilities !== undefined ? { capabilities: opts.capabilities } : {}),
+    });
   const hub = new FakeRemoteHub(ctx);
   hub.addBackendTarget('t1', broker, opts.withPairingRef === false ? undefined : REF);
   const fiber = await ctx.plugin(DaemonRemoteSessions, {
@@ -347,5 +353,102 @@ describe('detach / dispose', () => {
     s.broker.dropConnections();
     await tick();
     await expect(handle.detach()).resolves.toBeUndefined();
+  });
+});
+
+describe('protocol v2 (through the cordis service)', () => {
+  it('records backend capabilities, reachable via the public client', async () => {
+    const s = track(await setup());
+    await s.sessions.list('t1');
+    const caps = s.sessions.client.capabilitiesOf('t1');
+    expect(caps).toBeDefined();
+    for (const cap of ['history', 'compact', 'fork-at-seq', 'questions', 'prompt-blocks', 'catalogs', 'pending-interactions']) {
+      expect(caps!.has(cap)).toBe(true);
+    }
+    // The public connection accessor replaces the old private-map poke.
+    const conn = await s.sessions.client.connection('t1');
+    expect(conn.connected).toBe(true);
+  });
+
+  it('fails capability-gated features fast (REMOTE_CAPABILITY_UNSUPPORTED) against a pre-v2 backend', async () => {
+    const s = track(await setup({ capabilities: [] }));
+    const { sessionId } = s.broker.createSession({});
+    const handle = await s.sessions.attach('t1', sessionId, { mode: 'write' });
+    await expect(handle.history()).rejects.toMatchObject({ code: 'REMOTE_CAPABILITY_UNSUPPORTED' });
+    await expect(handle.compact()).rejects.toMatchObject({ code: 'REMOTE_CAPABILITY_UNSUPPORTED' });
+    await expect(handle.fork({ atSeq: 0 })).rejects.toMatchObject({ code: 'REMOTE_CAPABILITY_UNSUPPORTED' });
+    await expect(
+      handle.prompt({ text: 'hi', content: [{ type: 'text', text: 'hi' }] }),
+    ).rejects.toMatchObject({ code: 'REMOTE_CAPABILITY_UNSUPPORTED' });
+    await expect(s.sessions.client.listCatalog('t1', 'skills')).rejects.toMatchObject({
+      code: 'REMOTE_CAPABILITY_UNSUPPORTED',
+    });
+    expect(s.broker.compactCalls).toHaveLength(0);
+    expect(s.broker.forkCalls).toHaveLength(0);
+  });
+
+  it('history / fork atSeq / compact / prompt blocks round-trip through the service', async () => {
+    const s = track(await setup());
+    const { sessionId } = s.broker.createSession({});
+    for (let n = 1; n <= 3; n++) s.broker.emit(sessionId, 'output', { n });
+    const handle = await s.sessions.attach('t1', sessionId, { mode: 'write' });
+
+    const page = await handle.history({ maxMessages: 2 });
+    expect(page.entries.map((e) => e.seq)).toEqual([1, 2]);
+    expect(page.hasMore).toBe(true);
+
+    const { sessionId: forkId } = await handle.fork({ atSeq: 0 });
+    expect(s.broker.forkCalls).toEqual([{ source: sessionId, upto: 0 }]);
+    expect((await s.sessions.attach('t1', forkId)).lastSeq).toBe(0);
+
+    await expect(handle.compact()).resolves.toEqual({ compacted: true });
+    expect(s.broker.compactCalls).toEqual([sessionId]);
+
+    const events: SessionEvent[] = [];
+    handle.onEvent((e) => events.push(e));
+    const content = [{ type: 'image' as const, mediaType: 'image/png', data: 'aGVsbG8=' }];
+    await handle.prompt({ text: 'see image', content });
+    await vi.waitFor(() => expect(events).toHaveLength(1));
+    expect(events[0]).toMatchObject({ type: 'user/message', data: { text: 'see image', content } });
+  });
+
+  it('approval and question requests flow through handle callbacks; answers settle them', async () => {
+    const s = track(await setup());
+    const { sessionId } = s.broker.createSession({});
+    const handle = await s.sessions.attach('t1', sessionId);
+    const approvals: ApprovalRequestParams[] = [];
+    const questions: QuestionRequestParams[] = [];
+    handle.onApproval((req) => approvals.push(req));
+    handle.onQuestion((req) => questions.push(req));
+
+    const apprId = s.broker.raiseApproval({ sessionId, kind: 'exec', summary: 'do it' });
+    await vi.waitFor(() => expect(approvals.map((r) => r.requestId)).toEqual([apprId]));
+    await handle.answerApproval(apprId, 'approve');
+    expect(s.broker.pendingApprovalsOf(sessionId)).toHaveLength(0);
+
+    const qId = s.broker.raiseQuestion({
+      sessionId,
+      items: [{ id: 'ok', question: 'Proceed?', options: [{ id: 'yes', label: 'Yes' }] }],
+    });
+    await vi.waitFor(() => expect(questions.map((r) => r.questionId)).toEqual([qId]));
+    await handle.answerQuestion(qId, { ok: 'yes' });
+    expect(s.broker.pendingQuestionsOf(sessionId)).toHaveLength(0);
+  });
+
+  it('pendingInteractions replay on attach and again on reattach after a reconnect', async () => {
+    const s = track(await setup());
+    const { sessionId } = s.broker.createSession({});
+    const apprId = s.broker.raiseApproval({ sessionId, kind: 'fs-write', summary: 'pending' });
+    // Raised before the attach: replayed from the attach result.
+    const handle = await s.sessions.attach('t1', sessionId);
+    const requests: string[] = [];
+    handle.onApproval((req) => requests.push(req.requestId));
+    expect(requests).toEqual([apprId]);
+
+    s.broker.dropConnections();
+    await vi.waitFor(() => expect(s.hub.connectCalls).toBeGreaterThanOrEqual(2));
+    await vi.waitFor(() => expect(requests).toEqual([apprId, apprId]));
+    await handle.answerApproval(apprId, 'deny');
+    expect(s.broker.pendingApprovalsOf(sessionId)).toHaveLength(0);
   });
 });

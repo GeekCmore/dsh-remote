@@ -17,23 +17,30 @@
 import { randomBytes } from 'node:crypto';
 import type { Readable, Writable } from 'node:stream';
 import {
+  Capabilities,
   ChannelMux,
   JsonRpcPeer,
   Methods,
   RemoteError,
   createChallenge,
   type ApprovalAnswerParams,
+  type CatalogListParams,
+  type CatalogListResult,
   type ChallengeMessage,
   type HelloMessage,
   type HelloProofParams,
   type HelloProofResult,
   type MonitorSubscribeParams,
+  type PendingInteraction,
+  type QuestionAnswerParams,
   type SessionAttachParams,
   type SessionCancelParams,
+  type SessionCompactParams,
   type SessionControlReleaseParams,
   type SessionCreateParams,
   type SessionDetachParams,
   type SessionForkParams,
+  type SessionHistoryParams,
   type SessionPromptParams,
   type TransferOpenParams,
 } from '@dsh-remote/core';
@@ -44,10 +51,16 @@ import { loadToken } from './config.js';
 import type {
   AgentHostAccess,
   ApprovalHostAccess,
+  AttachmentsHostAccess,
+  CatalogHostAccess,
+  CompactionHostAccess,
+  PersistenceHostAccess,
+  QuestionHostAccess,
   SessionHostAccess,
 } from './host.js';
 import { MonitorCollector } from './monitor.js';
 import { ApprovalBridge as ApprovalBridgeImpl } from './approval.js';
+import { QuestionBridge } from './question.js';
 import { TransferManager } from './transfer.js';
 
 /** Auth failure rate-limit knobs. */
@@ -69,6 +82,9 @@ export interface BackendServerDeps {
   token: string;
   broker: SessionBroker;
   approval?: ApprovalBridge;
+  question?: QuestionBridge;
+  /** Read-only catalogs (`catalog.list`); absent → capability not advertised. */
+  catalogs?: CatalogHostAccess;
   monitor?: MonitorCollector;
   transfer?: TransferManager;
   diag?: (message: string) => void;
@@ -142,8 +158,12 @@ export class BackendServer {
   readonly mux: ChannelMux;
   #broker: SessionBroker;
   #approval?: ApprovalBridge;
+  #question?: QuestionBridge;
+  #catalogs?: CatalogHostAccess;
   #monitor?: MonitorCollector;
   #transfer?: TransferManager;
+  /** Capability bits advertised on the challenge (derived from subsystems). */
+  #capabilities: string[];
   #diag: (message: string) => void;
   #auth: Required<ServeAuthOptions>;
   #onFatal?: () => void;
@@ -154,8 +174,11 @@ export class BackendServer {
   constructor(deps: BackendServerDeps) {
     this.#broker = deps.broker;
     this.#approval = deps.approval;
+    this.#question = deps.question;
+    this.#catalogs = deps.catalogs;
     this.#monitor = deps.monitor;
     this.#transfer = deps.transfer;
+    this.#capabilities = computeCapabilities(deps);
     this.#diag = deps.diag ?? (() => {});
     this.#onFatal = deps.onFatal;
     this.#mintClientId = deps.mintClientId ?? (() => `client-${randomBytes(4).toString('hex')}`);
@@ -188,7 +211,7 @@ export class BackendServer {
       ) {
         throw new RemoteError('REMOTE_PROTOCOL_ERROR', 'malformed hello');
       }
-      const challenge: ChallengeMessage = createChallenge();
+      const challenge: ChallengeMessage = createChallenge(undefined, this.#capabilities);
       pendingHello = { hello, serverNonce: challenge.nonce };
       return challenge;
     });
@@ -230,6 +253,7 @@ export class BackendServer {
       if (!clientId) return;
       this.#broker.disconnect(clientId);
       this.#approval?.disconnect(clientId);
+      this.#question?.disconnect(clientId);
       this.#monitor?.unsubscribe(clientId);
     });
   }
@@ -250,16 +274,19 @@ export class BackendServer {
     peer.on(Methods.SessionCreate, (params) =>
       this.#broker.create(clientId, (params ?? {}) as SessionCreateParams),
     );
-    peer.on(Methods.SessionAttach, (params) =>
-      this.#broker.attach(clientId, params as SessionAttachParams),
-    );
+    peer.on(Methods.SessionAttach, (params) => {
+      const p = params as SessionAttachParams;
+      return this.#broker.attach(clientId, p, {
+        pendingInteractions: this.#pendingInteractions(p.sessionId),
+      });
+    });
     peer.on(Methods.SessionDetach, (params) => {
       this.#broker.detach(clientId, (params as SessionDetachParams).sessionId);
       return null;
     });
     peer.on(Methods.SessionPrompt, (params) => {
       const p = params as SessionPromptParams;
-      return this.#broker.prompt(clientId, p.sessionId, p.text);
+      return this.#broker.prompt(clientId, p.sessionId, p.text, p.content);
     });
     peer.on(Methods.SessionCancel, (params) => {
       this.#broker.cancel(clientId, (params as SessionCancelParams).sessionId);
@@ -267,22 +294,36 @@ export class BackendServer {
     });
     peer.on(Methods.SessionFork, (params) => {
       const p = params as SessionForkParams;
-      return this.#broker.fork(clientId, p.sessionId, p.boundary);
+      return this.#broker.fork(clientId, p.sessionId, p.boundary, p.atSeq);
     });
+    peer.on(Methods.SessionHistory, (params) =>
+      this.#broker.history((params ?? {}) as SessionHistoryParams),
+    );
+    peer.on(Methods.SessionCompact, (params) =>
+      this.#broker.compact(clientId, (params as SessionCompactParams).sessionId),
+    );
     peer.on(Methods.SessionControlRelease, (params) => {
       this.#broker.controlRelease(clientId, (params as SessionControlReleaseParams).sessionId);
       return null;
     });
     peer.on(Methods.ApprovalAnswer, (params) => {
       if (!this.#approval) {
-        throw new RemoteError('REMOTE_PROTOCOL_ERROR', 'this backend has no approval bridge');
+        throw new RemoteError('REMOTE_CAPABILITY_UNSUPPORTED', 'this backend has no approval bridge');
       }
       this.#approval.answer(clientId, params as ApprovalAnswerParams);
       return null;
     });
+    peer.on(Methods.QuestionAnswer, (params) => {
+      if (!this.#question) {
+        throw new RemoteError('REMOTE_CAPABILITY_UNSUPPORTED', 'this backend has no question bridge');
+      }
+      this.#question.answer(clientId, params as QuestionAnswerParams);
+      return null;
+    });
+    peer.on(Methods.CatalogList, (params) => this.#catalogList(params as CatalogListParams));
     peer.on(Methods.MonitorSubscribe, (params) => {
       if (!this.#monitor) {
-        throw new RemoteError('REMOTE_PROTOCOL_ERROR', 'this backend has no monitor');
+        throw new RemoteError('REMOTE_CAPABILITY_UNSUPPORTED', 'this backend has no monitor');
       }
       const p = (params ?? {}) as MonitorSubscribeParams;
       this.#monitor.subscribe(
@@ -298,11 +339,95 @@ export class BackendServer {
     });
     peer.on(Methods.TransferOpen, (params) => {
       if (!this.#transfer) {
-        throw new RemoteError('REMOTE_PROTOCOL_ERROR', 'this backend has no transfer endpoint');
+        throw new RemoteError('REMOTE_CAPABILITY_UNSUPPORTED', 'this backend has no transfer endpoint');
       }
       return this.#transfer.open(params as TransferOpenParams);
     });
   }
+
+  /**
+   * Outstanding approvals/questions on a session, for the attach result.
+   * Undefined (capability inactive) when neither bridge exists.
+   */
+  #pendingInteractions(sessionId: string): PendingInteraction[] | undefined {
+    if (!this.#approval && !this.#question) return undefined;
+    const out: PendingInteraction[] = [];
+    for (const request of this.#approval?.pendingForSession(sessionId) ?? []) {
+      out.push({ kind: 'approval', request });
+    }
+    for (const request of this.#question?.pendingForSession(sessionId) ?? []) {
+      out.push({ kind: 'question', request });
+    }
+    return out;
+  }
+
+  /** `catalog.list`: read-only catalogs, gated per kind. */
+  #catalogList(params: CatalogListParams): CatalogListResult {
+    const catalogs = this.#catalogs;
+    const unsupported = (kind: string) =>
+      new RemoteError('REMOTE_CAPABILITY_UNSUPPORTED', `this backend has no ${kind} catalog`);
+    switch (params?.kind) {
+      case 'models': {
+        const llm = catalogs?.llm;
+        if (!llm) throw unsupported('models');
+        return {
+          kind: 'models',
+          providers: llm.listProviders().map((provider) => ({
+            provider: provider.id,
+            models: llm.listModels(provider.id).map((model) => ({
+              id: model.id,
+              ...(model.name !== undefined ? { name: model.name } : {}),
+              ...(model.reasoningEfforts !== undefined
+                ? { reasoningEfforts: model.reasoningEfforts }
+                : {}),
+              ...(model.routable !== undefined ? { routable: model.routable } : {}),
+              ...(model.current !== undefined ? { current: model.current } : {}),
+            })),
+          })),
+        };
+      }
+      case 'skills': {
+        const skills = catalogs?.skills;
+        if (!skills) throw unsupported('skills');
+        return {
+          kind: 'skills',
+          skills: skills.list().map((skill) => ({
+            name: skill.name,
+            ...(skill.description !== undefined ? { description: skill.description } : {}),
+          })),
+        };
+      }
+      case 'agentPresets': {
+        const presets = catalogs?.agentPresets;
+        if (!presets) throw unsupported('agentPresets');
+        return {
+          kind: 'agentPresets',
+          agentPresets: presets.list().map((preset) => ({
+            id: preset.id,
+            name: preset.name,
+            ...(preset.description !== undefined ? { description: preset.description } : {}),
+            isDefault: preset.isDefault,
+          })),
+        };
+      }
+      default:
+        throw new RemoteError('REMOTE_PROTOCOL_ERROR', `unknown catalog kind "${String(params?.kind)}"`);
+    }
+  }
+}
+
+/**
+ * The capability set advertised on the challenge, computed from which
+ * subsystems are present: the broker reports the host-derived bits
+ * (history / compact / prompt-blocks, plus fork-at-seq which its contract
+ * always honors); the server adds the bridge- and catalog-derived bits.
+ */
+function computeCapabilities(deps: BackendServerDeps): string[] {
+  const caps = new Set(deps.broker.capabilities);
+  if (deps.question) caps.add(Capabilities.Questions);
+  if (deps.catalogs) caps.add(Capabilities.Catalogs);
+  if (deps.approval || deps.question) caps.add(Capabilities.PendingInteractions);
+  return [...caps];
 }
 
 /** Options for the real stdio entry point. */
@@ -313,6 +438,16 @@ export interface RunServeOptions {
   agents: AgentHostAccess;
   approvalHost?: ApprovalHostAccess;
   approval?: ApprovalBridgeOptions;
+  /** Cold-session history (`session.history`); absent → capability off. */
+  persistenceHost?: PersistenceHostAccess;
+  /** ask_user_question provider registry; absent → capability off. */
+  questionHost?: QuestionHostAccess;
+  /** Read-only catalogs (`catalog.list`); absent → capability off. */
+  catalogHost?: CatalogHostAccess;
+  /** Context compaction (`session.compact`); absent → capability off. */
+  compactionHost?: CompactionHostAccess;
+  /** Image prompt blocks; absent → capability off. */
+  attachmentsHost?: AttachmentsHostAccess;
   /** df target for the disk metric; defaults to process.cwd(). */
   workspacePath?: string;
   input?: Readable;
@@ -337,9 +472,16 @@ export async function runServe(options: RunServeOptions): Promise<void> {
   }
   const input = options.input ?? process.stdin;
   const output = options.output ?? process.stdout;
-  const broker = new SessionBroker(options.sessions, options.agents);
+  const broker = new SessionBroker(options.sessions, options.agents, {
+    ...(options.persistenceHost !== undefined ? { persistence: options.persistenceHost } : {}),
+    ...(options.compactionHost !== undefined ? { compaction: options.compactionHost } : {}),
+    ...(options.attachmentsHost !== undefined ? { attachments: options.attachmentsHost } : {}),
+  });
   const approval = options.approvalHost
     ? new ApprovalBridgeImpl(options.approvalHost, broker, options.approval)
+    : undefined;
+  const question = options.questionHost
+    ? new QuestionBridge(options.questionHost, broker)
     : undefined;
   const monitor = new MonitorCollector({
     workspacePath: options.workspacePath ?? process.cwd(),
@@ -353,6 +495,8 @@ export async function runServe(options: RunServeOptions): Promise<void> {
     token,
     broker,
     ...(approval !== undefined ? { approval } : {}),
+    ...(question !== undefined ? { question } : {}),
+    ...(options.catalogHost !== undefined ? { catalogs: options.catalogHost } : {}),
     monitor,
     transfer,
     diag,
@@ -364,5 +508,7 @@ export async function runServe(options: RunServeOptions): Promise<void> {
   });
   await server.closed;
   monitor.dispose();
+  question?.dispose();
+  approval?.dispose();
   if (fatal) process.exitCode = 1;
 }

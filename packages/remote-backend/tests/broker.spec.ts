@@ -136,7 +136,7 @@ describe('SessionBroker control lease', () => {
     expect(result.holder).toBe('a');
   });
 
-  it('force preempts the holder; the loser stays attached and is notified', () => {
+  it('force preempts the holder; the loser stays attached and is notified', async () => {
     const { sessions, broker } = makeBroker();
     sessions.add('s1');
     const a = fakeConnection('a');
@@ -153,12 +153,12 @@ describe('SessionBroker control lease', () => {
       });
     }
     // The preempted client lost write power but keeps the event feed.
-    expect(() => broker.prompt('a', 's1', 'hi')).toThrowError(/controlled by/);
+    await expect(broker.prompt('a', 's1', 'hi')).rejects.toThrowError(/controlled by/);
     sessions.emit('s1', 'todo/write', { todos: [] });
     expect(a.notifications.some((n) => n.method === Notifications.SessionEvent)).toBe(true);
   });
 
-  it('control-release demotes the holder and broadcasts released', () => {
+  it('control-release demotes the holder and broadcasts released', async () => {
     const { sessions, broker } = makeBroker();
     sessions.add('s1');
     const a = fakeConnection('a');
@@ -169,7 +169,7 @@ describe('SessionBroker control lease', () => {
       method: Notifications.SessionControlChanged,
       params: { sessionId: 's1', holder: null, reason: 'released' },
     });
-    expect(() => broker.prompt('a', 's1', 'hi')).toThrowError(RemoteError);
+    await expect(broker.prompt('a', 's1', 'hi')).rejects.toThrowError(RemoteError);
     // Release by a non-holder is a no-op.
     broker.controlRelease('a', 's1');
   });
@@ -208,7 +208,7 @@ describe('SessionBroker control lease', () => {
 });
 
 describe('SessionBroker prompt/cancel/fork gating', () => {
-  it('prompt requires the write lease and reaches agent.followup', () => {
+  it('prompt requires the write lease and reaches agent.followup', async () => {
     const { sessions, agents, broker } = makeBroker();
     sessions.add('s1');
     const agent = agents.add('s1');
@@ -219,8 +219,8 @@ describe('SessionBroker prompt/cancel/fork gating', () => {
     broker.attach('a', { sessionId: 's1', mode: 'write' });
     broker.attach('b', { sessionId: 's1', mode: 'read' });
 
-    expect(() => broker.prompt('b', 's1', 'hello')).toThrowError(/controlled by "a"|controlled by a/);
-    broker.prompt('a', 's1', 'hello');
+    await expect(broker.prompt('b', 's1', 'hello')).rejects.toThrowError(/controlled by "a"|controlled by a/);
+    await broker.prompt('a', 's1', 'hello');
     expect(agent.prompts).toHaveLength(1);
     expect(agent.prompts[0]).toMatchObject({ role: 'user', content: [{ type: 'text', text: 'hello' }] });
   });
@@ -236,13 +236,13 @@ describe('SessionBroker prompt/cancel/fork gating', () => {
     expect(agent.cancelled).toBe(1);
   });
 
-  it('prompt/cancel on a session without a live agent fail clearly', () => {
+  it('prompt/cancel on a session without a live agent fail clearly', async () => {
     const { sessions, broker } = makeBroker();
     sessions.add('s1');
     const a = fakeConnection('a');
     broker.connect(a.conn);
     broker.attach('a', { sessionId: 's1', mode: 'write' });
-    expect(() => broker.prompt('a', 's1', 'x')).toThrowError(/no live agent/);
+    await expect(broker.prompt('a', 's1', 'x')).rejects.toThrowError(/no live agent/);
     expect(() => broker.cancel('a', 's1')).toThrowError(/no live agent/);
   });
 
@@ -262,6 +262,24 @@ describe('SessionBroker prompt/cancel/fork gating', () => {
     const result = broker.fork('a', 's1', 0);
     expect(result.sessionId).toContain('s1-fork');
     expect(sessions.get(result.sessionId)?.events).toHaveLength(1);
+  });
+
+  it('fork with atSeq rewinds to the given seq when boundary is absent', () => {
+    const { sessions, broker } = makeBroker();
+    sessions.add('s1');
+    sessions.emit('s1', 'turn/start', { turn: 1 });
+    sessions.emit('s1', 'turn/end', { turn: 1, reason: { kind: 'completed' } });
+    sessions.emit('s1', 'turn/start', { turn: 2 });
+    const a = fakeConnection('a');
+    broker.connect(a.conn);
+    broker.attach('a', { sessionId: 's1', mode: 'write' });
+
+    const result = broker.fork('a', 's1', undefined, 0);
+    // History up to and including seq 0 is kept; everything after is dropped.
+    expect(sessions.get(result.sessionId)?.events).toHaveLength(1);
+    // boundary still wins when both are passed.
+    const both = broker.fork('a', 's1', 1, 0);
+    expect(sessions.get(both.sessionId)?.events).toHaveLength(2);
   });
 });
 

@@ -25,25 +25,45 @@ import {
   ApprovalBridge,
   BackendServer,
   MonitorCollector,
+  QuestionBridge,
   SessionBroker,
 } from '@dsh-remote/backend';
 import { BytePipe } from '../byte-pipe.js';
 import {
   FakeAgentHost,
   FakeApprovalHost,
+  FakeAttachments,
+  FakeCatalogs,
+  FakeCompaction,
+  FakePersistence,
+  FakeQuestionHost,
   FakeSessionHost,
   fakeMonitorSources,
 } from './fakes.js';
 
 export const E2E_TOKEN = 'e2e-pairing-token-0123456789abcdef';
 
-/** One remote host: the shared backend internals plus its live channels. */
+/**
+ * One remote host: the shared backend internals plus its live channels.
+ * Wires the full protocol v2 subsystem set (persistence, questions, catalogs,
+ * compaction, attachments), so the handshake advertises every capability.
+ */
 export class BackendRig {
   readonly sessions = new FakeSessionHost();
   readonly agents = new FakeAgentHost();
   readonly approvalHost = new FakeApprovalHost();
-  readonly broker = new SessionBroker(this.sessions, this.agents);
+  readonly persistence = new FakePersistence();
+  readonly questionHost = new FakeQuestionHost();
+  readonly catalogs = new FakeCatalogs();
+  readonly compaction = new FakeCompaction();
+  readonly attachments = new FakeAttachments();
+  readonly broker = new SessionBroker(this.sessions, this.agents, {
+    persistence: this.persistence,
+    compaction: this.compaction,
+    attachments: this.attachments,
+  });
   readonly approval = new ApprovalBridge(this.approvalHost, this.broker);
+  readonly question = new QuestionBridge(this.questionHost, this.broker);
   readonly monitor = new MonitorCollector({
     workspacePath: '/work',
     stats: () => this.broker.stats(),
@@ -73,6 +93,8 @@ export class BackendRig {
       token: E2E_TOKEN,
       broker: this.broker,
       approval: this.approval,
+      question: this.question,
+      catalogs: this.catalogs,
       monitor: this.monitor,
       diag: (msg) => this.diags.push(msg),
       auth: { baseDelayMs: 1, maxDelayMs: 5, maxFailures: 3 },

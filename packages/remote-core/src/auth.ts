@@ -7,7 +7,8 @@
  *
  * 1. frontend sends {@link createHello} (protocol version, capabilities,
  *    client nonce);
- * 2. backend answers {@link createChallenge} (server nonce);
+ * 2. backend answers {@link createChallenge} (server nonce, backend-advertised
+ *    capabilities);
  * 3. frontend proves token possession with {@link computeProof}:
  *    `HMAC-SHA256(token, clientNonce ‖ serverNonce ‖ canonicalJSON(hello))`
  *    as hex. Both nonces are fixed-length hex (16 random bytes), so plain
@@ -33,7 +34,36 @@ export interface HelloMessage {
 export interface ChallengeMessage {
   /** Server nonce: 16 random bytes as hex, unless supplied by the caller. */
   nonce: string;
+  /** Feature names the backend supports (may be empty). */
+  capabilities: string[];
 }
+
+/**
+ * Capability bits negotiated during the handshake: the frontend advertises
+ * its set in {@link HelloMessage.capabilities}, the backend answers with its
+ * own in {@link ChallengeMessage.capabilities}. Intersect the two to know
+ * what a connection may use. This — not the protocol version — is the
+ * wire-evolution mechanism: new features add a bit here, additively.
+ */
+export const Capabilities = {
+  /** `session.history` seq-paginated history without resuming an agent. */
+  History: 'history',
+  /** `session.compact` context compaction. */
+  Compact: 'compact',
+  /** `session.fork` with `atSeq` (fork at a completed-turn boundary). */
+  ForkAtSeq: 'fork-at-seq',
+  /** `question.request` / `question.answer` / `question.closed`. */
+  Questions: 'questions',
+  /** `session.prompt` with structured `content` blocks (text + images). */
+  PromptBlocks: 'prompt-blocks',
+  /** `catalog.list` model/skill/agent-preset catalogs. */
+  Catalogs: 'catalogs',
+  /** `session.attach` results carrying `pendingInteractions`. */
+  PendingInteractions: 'pending-interactions',
+} as const;
+
+/** A known capability bit ({@link Capabilities} value). */
+export type Capability = (typeof Capabilities)[keyof typeof Capabilities];
 
 /** Build the handshake greeting. Pass `clientNonce` only to replay a known value (tests). */
 export function createHello(clientNonce?: string, capabilities: string[] = []): HelloMessage {
@@ -44,9 +74,13 @@ export function createHello(clientNonce?: string, capabilities: string[] = []): 
   };
 }
 
-/** Build the backend challenge. Pass `serverNonce` only to replay a known value (tests). */
-export function createChallenge(serverNonce?: string): ChallengeMessage {
-  return { nonce: serverNonce ?? randomBytes(16).toString('hex') };
+/**
+ * Build the backend challenge. Pass `serverNonce` only to replay a known
+ * value (tests). `capabilities` advertises what the backend supports; see
+ * {@link Capabilities} for the known bits.
+ */
+export function createChallenge(serverNonce?: string, capabilities: string[] = []): ChallengeMessage {
+  return { nonce: serverNonce ?? randomBytes(16).toString('hex'), capabilities };
 }
 
 /**

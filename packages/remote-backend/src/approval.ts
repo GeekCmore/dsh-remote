@@ -45,6 +45,8 @@ interface PendingRequest {
   readonly sessionId?: string;
   /** Clients still eligible to answer. */
   readonly targets: Set<string>;
+  /** The wire payload, kept for pendingInteractions replay. */
+  readonly params: ApprovalRequestParams;
   readonly resolve: (decision: HostApprovalDecision) => void;
 }
 
@@ -93,6 +95,15 @@ export class ApprovalBridge {
     }
   }
 
+  /** Outstanding requests on one session (session.attach pendingInteractions). */
+  pendingForSession(sessionId: string): ApprovalRequestParams[] {
+    const out: ApprovalRequestParams[] = [];
+    for (const pending of this.#pending.values()) {
+      if (pending.sessionId === sessionId) out.push(pending.params);
+    }
+    return out;
+  }
+
   /** Number of requests still awaiting an answer (tests/diagnostics). */
   get pendingCount(): number {
     return this.#pending.size;
@@ -119,15 +130,6 @@ export class ApprovalBridge {
     }
 
     const requestId = `apr-${randomBytes(8).toString('hex')}`;
-    const decisionPromise = new Promise<HostApprovalDecision>((resolve) => {
-      this.#pending.set(requestId, {
-        requestId,
-        ...(sessionId !== undefined ? { sessionId } : {}),
-        targets: new Set(targets.map((conn) => conn.clientId)),
-        resolve,
-      });
-    });
-    if (sessionId !== undefined) this.#broker.setWaitingApproval(sessionId, true);
     const params: ApprovalRequestParams = {
       requestId,
       sessionId: sessionId ?? '',
@@ -135,6 +137,16 @@ export class ApprovalBridge {
       summary: request.summary,
       ...(request.detail !== undefined ? { detail: request.detail } : {}),
     };
+    const decisionPromise = new Promise<HostApprovalDecision>((resolve) => {
+      this.#pending.set(requestId, {
+        requestId,
+        ...(sessionId !== undefined ? { sessionId } : {}),
+        targets: new Set(targets.map((conn) => conn.clientId)),
+        params,
+        resolve,
+      });
+    });
+    if (sessionId !== undefined) this.#broker.setWaitingApproval(sessionId, true);
     for (const conn of targets) {
       try {
         conn.notify(Methods.ApprovalRequest, params);

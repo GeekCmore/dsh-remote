@@ -9,6 +9,7 @@
     "build": "pnpm -r build",
     "test": "pnpm -r test",
     "typecheck": "pnpm -r typecheck",
+    "verify:contract": "node scripts/verify-contract.mjs",
     "smoke:dsh-host": "bash e2e/dsh-host/run-smoke.sh"
   },
   "devDependencies": {

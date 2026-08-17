@@ -31,8 +31,6 @@ export const PROTOCOL_VERSION = 1;
 export const Methods = {
   /** F→B: handshake step 1, {@link HelloMessage} → {@link ChallengeMessage}. */
   Hello: 'hello',
-  /** B→F: request the frontend's hello (re-negotiation); same shapes as hello. */
-  HelloChallenge: 'hello.challenge',
   /** F→B: handshake step 3, {@link HelloProofParams} → {@link HelloProofResult}. */
   HelloProof: 'hello.proof',
   /** List sessions known to the daemon. */
@@ -51,10 +49,20 @@ export const Methods = {
   SessionCancel: 'session.cancel',
   /** Fork a session at an optional event boundary. */
   SessionFork: 'session.fork',
+  /** Read seq-paginated session history WITHOUT resuming the agent. */
+  SessionHistory: 'session.history',
+  /** Compact a session's context in place. */
+  SessionCompact: 'session.compact',
   /** B→F: ask the frontend user to approve an action. */
   ApprovalRequest: 'approval.request',
   /** F→B: answer a pending approval request. */
   ApprovalAnswer: 'approval.answer',
+  /** B→F: ask the frontend user one or more structured questions. */
+  QuestionRequest: 'question.request',
+  /** F→B: answer a pending question request. */
+  QuestionAnswer: 'question.answer',
+  /** List a catalog (models, skills, agent presets) known to the daemon. */
+  CatalogList: 'catalog.list',
   /** Subscribe this connection to daemon metrics notifications. */
   MonitorSubscribe: 'monitor.subscribe',
   /** Stop this connection's daemon metrics subscription. */
@@ -75,6 +83,8 @@ export const Notifications = {
   MonitorMetrics: 'monitor.metrics',
   /** B→F: an approval request was settled; unanswered clients stand down. */
   ApprovalClosed: 'approval.closed',
+  /** B→F: a question request was settled; unanswered clients stand down. */
+  QuestionClosed: 'question.closed',
 } as const;
 
 /** Attach mode: `read` tails events, `write` additionally takes control. */
@@ -128,6 +138,13 @@ export interface SessionAttachResult {
   holder: string | null;
   /** Highest event seq the session has emitted so far; -1 when the log is empty. */
   lastSeq: number;
+  /**
+   * Interactions (approvals, questions) still outstanding on the session at
+   * attach time, so a (re)attaching client can replay their prompts. Absent
+   * when none are pending or the backend does not advertise the
+   * `pending-interactions` capability.
+   */
+  pendingInteractions?: PendingInteraction[];
 }
 
 /** `error.data.remoteData` of a REMOTE_SESSION_LOCKED attach failure. */
@@ -183,9 +200,27 @@ export interface SessionControlReleaseParams {
   sessionId: string;
 }
 
+/**
+ * One content block of a structured prompt ({@link SessionPromptParams.content}).
+ * Images travel base64-encoded, like transfer payloads.
+ */
+export type PromptContentBlock =
+  | { type: 'text'; text: string }
+  | { type: 'image'; mediaType: string; /** Base64-encoded image bytes. */ data: string; name?: string };
+
 export interface SessionPromptParams {
   sessionId: string;
+  /**
+   * Plain-text prompt. Kept as the primary form for compatibility; backends
+   * without the `prompt-blocks` capability see only this field.
+   */
   text: string;
+  /**
+   * Structured prompt content (text + images), mirroring dsh's content-block
+   * message shape. When present, `text` carries the plain-text projection for
+   * peers without the `prompt-blocks` capability.
+   */
+  content?: PromptContentBlock[];
 }
 
 /**
@@ -205,11 +240,59 @@ export interface SessionForkParams {
   sessionId: string;
   /** Event seq to fork at; omit to fork at the current head. */
   boundary?: number;
+  /**
+   * Fork at a completed-turn boundary: the new session keeps the history up
+   * to and including this seq, dropping everything after. This is the
+   * protocol's rewind/time-travel semantic — there is deliberately no
+   * `session.rewind` method. Requires the `fork-at-seq` capability.
+   */
+  atSeq?: number;
 }
 
 export interface SessionForkResult {
   /** Session id of the fork. */
   sessionId: string;
+}
+
+/** Parameters for {@link Methods.SessionHistory}. */
+export interface SessionHistoryParams {
+  sessionId: string;
+  /**
+   * Return only events with seq strictly below this cursor (the caller's
+   * oldest known seq when paging backwards). Omit to start from the newest.
+   */
+  beforeSeq?: number;
+  /** Maximum number of entries to return (backend may clamp). */
+  maxMessages?: number;
+}
+
+/** One history entry: the event plus its log position, newest last. */
+export interface SessionHistoryEntry {
+  seq: number;
+  event: WireSessionEvent;
+}
+
+/**
+ * Result of {@link Methods.SessionHistory}: seq-paginated cold/hot history
+ * WITHOUT resuming an agent. `entries` is ordered by ascending seq.
+ */
+export interface SessionHistoryResult {
+  entries: SessionHistoryEntry[];
+  /** True when older history remains before the first returned entry. */
+  hasMore: boolean;
+}
+
+/** Parameters for {@link Methods.SessionCompact}. */
+export interface SessionCompactParams {
+  sessionId: string;
+}
+
+/**
+ * Result of {@link Methods.SessionCompact}: whether the backend actually
+ * compacted the session's context (false when it declined, e.g. mid-turn).
+ */
+export interface SessionCompactResult {
+  compacted: boolean;
 }
 
 /** Lifecycle status of a daemon session. */
@@ -300,6 +383,127 @@ export interface ApprovalClosedNotification {
   /** Client id whose answer won, absent on fail-closed denial. */
   winner?: string;
 }
+
+/** One selectable option of a {@link QuestionItem}. */
+export interface QuestionOption {
+  /** Stable option id, used as the answer value. */
+  id: string;
+  /** Human-readable label. */
+  label: string;
+  /** Longer explanation of the option, when available. */
+  description?: string;
+}
+
+/**
+ * One question of an ask-user-question request, modeled on dsh's
+ * ask_user_question tool shape (question/items/options/answers).
+ */
+export interface QuestionItem {
+  /** Stable item id, used as the answer-map key. */
+  id: string;
+  /** The question text shown to the user. */
+  question: string;
+  /** True when the user may select several options (answer value is an array). */
+  multiSelect?: boolean;
+  options: QuestionOption[];
+}
+
+/** Parameters of {@link Methods.QuestionRequest} (backend → frontend). */
+export interface QuestionRequestParams {
+  /** Correlates with the eventual question.answer. */
+  questionId: string;
+  sessionId: string;
+  /** Short human-readable summary of why input is needed. */
+  summary?: string;
+  items: QuestionItem[];
+}
+
+/**
+ * Parameters of {@link Methods.QuestionAnswer} (frontend → backend): the
+ * answer map keyed by {@link QuestionItem.id}; each value is the chosen
+ * {@link QuestionOption.id}, an array of ids for multi-select items, or
+ * free-form text.
+ */
+export interface QuestionAnswerParams {
+  questionId: string;
+  answers: Record<string, string | string[]>;
+}
+
+/**
+ * Notification payload for {@link Notifications.QuestionClosed}: the question
+ * was settled by another client (or withdrawn), so any client still showing
+ * it should dismiss the prompt.
+ */
+export interface QuestionClosedNotification {
+  questionId: string;
+  /** Answers that settled the question, absent when it was withdrawn. */
+  answers?: Record<string, string | string[]>;
+  /** Client id whose answer won, absent when withdrawn. */
+  winner?: string;
+}
+
+/**
+ * An interaction still outstanding on a session, replayed to (re)attaching
+ * clients via {@link SessionAttachResult.pendingInteractions}. Carries the
+ * same payloads (including stable ids) as the live
+ * {@link Methods.ApprovalRequest} / {@link Methods.QuestionRequest} calls.
+ */
+export type PendingInteraction =
+  | { kind: 'approval'; request: ApprovalRequestParams }
+  | { kind: 'question'; request: QuestionRequestParams };
+
+/** Catalog kind selectable in {@link Methods.CatalogList}. */
+export type CatalogKind = 'models' | 'skills' | 'agentPresets';
+
+/** Parameters for {@link Methods.CatalogList}. */
+export interface CatalogListParams {
+  kind: CatalogKind;
+}
+
+/** One model inside a {@link ModelProviderGroup}. */
+export interface CatalogModel {
+  /** Model id as passed to the provider. */
+  id: string;
+  /** Human-readable display name, when different from the id. */
+  name?: string;
+  /** Reasoning-effort options the model supports, when known. */
+  reasoningEfforts?: string[];
+  /** True when the model is routable (selectable) for this client. */
+  routable?: boolean;
+  /** True when this model is the daemon's current selection. */
+  current?: boolean;
+}
+
+/** Models of one provider, as returned by the `models` catalog. */
+export interface ModelProviderGroup {
+  /** Provider id (e.g. "anthropic", "openai-compatible"). */
+  provider: string;
+  models: CatalogModel[];
+}
+
+/** One skill summary, as returned by the `skills` catalog. */
+export interface SkillSummary {
+  name: string;
+  description?: string;
+}
+
+/** One agent-preset summary, as returned by the `agentPresets` catalog. */
+export interface AgentPresetSummary {
+  id: string;
+  name: string;
+  description?: string;
+  /** True when this preset is the daemon's default. */
+  isDefault: boolean;
+}
+
+/**
+ * Result of {@link Methods.CatalogList}: a frontend-agnostic payload union
+ * discriminated by the requested {@link CatalogKind}.
+ */
+export type CatalogListResult =
+  | { kind: 'models'; providers: ModelProviderGroup[] }
+  | { kind: 'skills'; skills: SkillSummary[] }
+  | { kind: 'agentPresets'; agentPresets: AgentPresetSummary[] };
 
 /** Parameters for {@link Methods.MonitorSubscribe}. */
 export interface MonitorSubscribeParams {

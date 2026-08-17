@@ -14,16 +14,28 @@ import {
 import { expect } from 'vitest';
 import type { SessionEvent } from '@dsh-remote/seams';
 import { ApprovalBridge } from '../src/approval.js';
+import { QuestionBridge } from '../src/question.js';
 import { SessionBroker, type BrokerConnection } from '../src/broker.js';
 import type {
   AgentHostAccess,
   ApprovalHostAccess,
+  AttachmentsHostAccess,
+  CatalogAgentPresetsAccess,
+  CatalogHostAccess,
+  CatalogLlmAccess,
+  CatalogSkillsAccess,
   ColdSessionInfo,
+  CompactionHostAccess,
   HostAgent,
   HostApprovalDecision,
   HostApprovalRequest,
+  HostQuestionAnswers,
+  HostQuestionRequest,
   HostSession,
   HostUserMessage,
+  PersistenceHostAccess,
+  QuestionHostAccess,
+  SavedImageAttachment,
   SessionHostAccess,
 } from '../src/host.js';
 import type { MonitorSources } from '../src/monitor.js';
@@ -101,11 +113,11 @@ export class FakeSessionHost implements SessionHostAccess {
     return [...this.sessions.values()];
   }
 
-  fork(source: string, boundary?: number): HostSession {
+  fork(source: string, boundary?: number, atSeq?: number): HostSession {
     const src = this.sessions.get(source);
     if (!src) throw new Error(`session "${source}" not found`);
     const child = this.add(`${source}-fork-${this.sessions.size}`);
-    const upto = boundary ?? src.events.length - 1;
+    const upto = boundary ?? atSeq ?? src.events.length - 1;
     child.events = src.events.slice(0, upto + 1);
     return child;
   }
@@ -201,6 +213,114 @@ export class FakeApprovalHost implements ApprovalHostAccess {
   }
 }
 
+/** In-memory cold-session store (PersistenceHostAccess). */
+export class FakePersistence implements PersistenceHostAccess {
+  readonly logs = new Map<string, SessionEvent[]>();
+  readCalls: { id: string; fromSeq?: number }[] = [];
+
+  /** Seed a cold session with `count` synthetic events (seq 0..count-1). */
+  seed(id: string, count: number, cwd = '/work'): void {
+    const events: SessionEvent[] = [];
+    for (let seq = 0; seq < count; seq++) {
+      events.push({ type: 'turn/start', seq, time: 1_000 + seq, data: { seq } } as unknown as SessionEvent);
+    }
+    this.logs.set(id, events);
+  }
+
+  inspect(id: string): { id: string; lastSeq?: number } | undefined {
+    const log = this.logs.get(id);
+    if (!log) return undefined;
+    return { id, lastSeq: log.length - 1 };
+  }
+
+  readFrom(id: string, fromSeq = 0): readonly SessionEvent[] {
+    this.readCalls.push({ id, fromSeq });
+    const log = this.logs.get(id);
+    if (!log) throw new Error(`no persisted session ${id}`);
+    return log.slice(fromSeq);
+  }
+
+  list(): ColdSessionInfo[] {
+    return [...this.logs.entries()].map(([id, log]) => ({
+      id,
+      cwd: '/work',
+      lastSeq: log.length - 1,
+    }));
+  }
+}
+
+/** Captures the registered ask_user_question provider (QuestionHostAccess). */
+export class FakeQuestionHost implements QuestionHostAccess {
+  #provider: { ask(request: HostQuestionRequest): Promise<HostQuestionAnswers> } | undefined;
+
+  registerProvider(provider: {
+    ask(request: HostQuestionRequest): Promise<HostQuestionAnswers>;
+  }): () => void {
+    this.#provider = provider;
+    return () => {
+      this.#provider = undefined;
+    };
+  }
+
+  /** Raise a host question; resolves with the provider's answers. */
+  ask(request: HostQuestionRequest): Promise<HostQuestionAnswers> {
+    if (!this.#provider) throw new Error('no question provider registered');
+    return this.#provider.ask(request);
+  }
+}
+
+/** Data-driven catalogs (CatalogHostAccess); omit a member to simulate absence. */
+export class FakeCatalogs implements CatalogHostAccess {
+  llm?: CatalogLlmAccess;
+  skills?: CatalogSkillsAccess;
+  agentPresets?: CatalogAgentPresetsAccess;
+
+  constructor(
+    data: {
+      llm?: CatalogLlmAccess;
+      skills?: CatalogSkillsAccess;
+      agentPresets?: CatalogAgentPresetsAccess;
+    } = {},
+  ) {
+    this.llm = data.llm ?? {
+      listProviders: () => [{ id: 'anthropic' }, { id: 'openai-compatible' }],
+      listModels: (providerId) =>
+        providerId === 'anthropic'
+          ? [{ id: 'claude-x', name: 'Claude X', current: true, routable: true }]
+          : [{ id: 'gpt-y', reasoningEfforts: ['low', 'high'] }],
+    };
+    this.skills = data.skills ?? {
+      list: () => [{ name: 'review', description: 'Code review' }],
+    };
+    this.agentPresets = data.agentPresets ?? {
+      list: () => [{ id: 'default', name: 'Default', isDefault: true }],
+    };
+  }
+}
+
+/** Records compaction calls (CompactionHostAccess). */
+export class FakeCompaction implements CompactionHostAccess {
+  calls: { agent: HostAgent; signal?: AbortSignal }[] = [];
+
+  async compactNow(agent: HostAgent, signal?: AbortSignal): Promise<void> {
+    this.calls.push({ agent, ...(signal !== undefined ? { signal } : {}) });
+  }
+}
+
+/** Records saved images and mints attachment refs (AttachmentsHostAccess). */
+export class FakeAttachments implements AttachmentsHostAccess {
+  saved: { data: Uint8Array; mediaType: string; name?: string }[] = [];
+
+  async saveImage(input: {
+    data: Uint8Array;
+    mediaType: string;
+    name?: string;
+  }): Promise<SavedImageAttachment> {
+    this.saved.push(input);
+    return { id: `att-${this.saved.length}` };
+  }
+}
+
 /** Recording broker connection (broker/approval-level tests). */
 export function fakeConnection(clientId: string): {
   conn: BrokerConnection;
@@ -241,9 +361,15 @@ export interface TestWorld {
   agents: FakeAgentHost;
   approvalHost: FakeApprovalHost;
   broker: SessionBroker;
-  approval: ApprovalBridge;
-  monitor: MonitorCollector;
-  transfer: TransferManager;
+  approval?: ApprovalBridge;
+  question?: QuestionBridge;
+  questionHost?: FakeQuestionHost;
+  persistence?: FakePersistence;
+  catalogs?: FakeCatalogs;
+  compaction?: FakeCompaction;
+  attachments?: FakeAttachments;
+  monitor?: MonitorCollector;
+  transfer?: TransferManager;
   server: BackendServer;
   client: JsonRpcPeer;
   clientMux: ChannelMux;
@@ -257,8 +383,15 @@ export const TEST_TOKEN = 'test-token-0123456789abcdef';
 
 export interface WorldOptions {
   auth?: ServeAuthOptions;
+  withApproval?: boolean;
   withTransfer?: boolean;
+  withMonitor?: boolean;
   monitorSources?: MonitorSources;
+  persistence?: FakePersistence;
+  questionHost?: FakeQuestionHost;
+  catalogs?: FakeCatalogs;
+  compaction?: FakeCompaction;
+  attachments?: FakeAttachments;
 }
 
 /** Run the real serve logic over a BytePipe pair against fake hosts. */
@@ -267,15 +400,27 @@ export function makeWorld(options: WorldOptions = {}): TestWorld {
   const sessions = new FakeSessionHost();
   const agents = new FakeAgentHost();
   const approvalHost = new FakeApprovalHost();
-  const broker = new SessionBroker(sessions, agents);
-  const approval = new ApprovalBridge(approvalHost, broker);
-  const monitor = new MonitorCollector({
-    workspacePath: '/work',
-    stats: () => broker.stats(),
-    sources: options.monitorSources ?? fakeMonitorSources(),
+  const broker = new SessionBroker(sessions, agents, {
+    ...(options.persistence !== undefined ? { persistence: options.persistence } : {}),
+    ...(options.compaction !== undefined ? { compaction: options.compaction } : {}),
+    ...(options.attachments !== undefined ? { attachments: options.attachments } : {}),
   });
+  const approval =
+    options.withApproval === false ? undefined : new ApprovalBridge(approvalHost, broker);
+  const question = options.questionHost
+    ? new QuestionBridge(options.questionHost, broker)
+    : undefined;
+  const monitor =
+    options.withMonitor === false
+      ? undefined
+      : new MonitorCollector({
+          workspacePath: '/work',
+          stats: () => broker.stats(),
+          sources: options.monitorSources ?? fakeMonitorSources(),
+        });
   const diags: string[] = [];
-  const transfer = new TransferManager({ diag: (msg) => diags.push(msg) });
+  const transfer =
+    options.withTransfer === false ? undefined : new TransferManager({ diag: (msg) => diags.push(msg) });
   let fatal = 0;
   let clientSeq = 0;
   const server = new BackendServer({
@@ -283,9 +428,11 @@ export function makeWorld(options: WorldOptions = {}): TestWorld {
     outbound: { send: (line) => bIn.push(line) },
     token: TEST_TOKEN,
     broker,
-    approval,
-    monitor,
-    transfer,
+    ...(approval !== undefined ? { approval } : {}),
+    ...(question !== undefined ? { question } : {}),
+    ...(options.catalogs !== undefined ? { catalogs: options.catalogs } : {}),
+    ...(monitor !== undefined ? { monitor } : {}),
+    ...(transfer !== undefined ? { transfer } : {}),
     diag: (msg) => diags.push(msg),
     auth: { baseDelayMs: 1, maxDelayMs: 5, ...options.auth },
     mintClientId: () => `client-${++clientSeq}`,
@@ -301,9 +448,15 @@ export function makeWorld(options: WorldOptions = {}): TestWorld {
     agents,
     approvalHost,
     broker,
-    approval,
-    monitor,
-    transfer,
+    ...(approval !== undefined ? { approval } : {}),
+    ...(question !== undefined ? { question } : {}),
+    ...(options.questionHost !== undefined ? { questionHost: options.questionHost } : {}),
+    ...(options.persistence !== undefined ? { persistence: options.persistence } : {}),
+    ...(options.catalogs !== undefined ? { catalogs: options.catalogs } : {}),
+    ...(options.compaction !== undefined ? { compaction: options.compaction } : {}),
+    ...(options.attachments !== undefined ? { attachments: options.attachments } : {}),
+    ...(monitor !== undefined ? { monitor } : {}),
+    ...(transfer !== undefined ? { transfer } : {}),
     server,
     client,
     clientMux,
@@ -314,17 +467,27 @@ export function makeWorld(options: WorldOptions = {}): TestWorld {
   };
 }
 
-/** Drive the real handshake as a properly-paired frontend would. */
-export async function handshake(client: JsonRpcPeer, token: string = TEST_TOKEN): Promise<HelloProofResult> {
-  const hello = createHello();
+/** Drive the real handshake; returns the proof result AND the challenge. */
+export async function handshakeWithChallenge(
+  client: JsonRpcPeer,
+  token: string = TEST_TOKEN,
+  capabilities: string[] = [],
+): Promise<{ result: HelloProofResult; challenge: ChallengeMessage }> {
+  const hello = createHello(undefined, capabilities);
   const challenge = (await client.call('hello', hello)) as ChallengeMessage;
   const proof = computeProof(token, hello.nonce, challenge.nonce, hello);
-  return (await client.call('hello.proof', {
+  const result = (await client.call('hello.proof', {
     clientNonce: hello.nonce,
     serverNonce: challenge.nonce,
     hello,
     proof,
   })) as HelloProofResult;
+  return { result, challenge };
+}
+
+/** Drive the real handshake as a properly-paired frontend would. */
+export async function handshake(client: JsonRpcPeer, token: string = TEST_TOKEN): Promise<HelloProofResult> {
+  return (await handshakeWithChallenge(client, token)).result;
 }
 
 /** Expect a call to reject with a RemoteError carrying `code`. */

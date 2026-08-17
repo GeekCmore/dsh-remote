@@ -13,7 +13,8 @@ export type RemoteErrorCode =
   | 'REMOTE_NOT_BOOTSTRAPPED'
   | 'REMOTE_SESSION_LOCKED'
   | 'REMOTE_PROTOCOL_ERROR'
-  | 'REMOTE_ABORTED';
+  | 'REMOTE_ABORTED'
+  | 'REMOTE_CAPABILITY_UNSUPPORTED';
 
 const REMOTE_ERROR_CODES: readonly RemoteErrorCode[] = [
   'REMOTE_CONN_LOST',
@@ -23,6 +24,7 @@ const REMOTE_ERROR_CODES: readonly RemoteErrorCode[] = [
   'REMOTE_SESSION_LOCKED',
   'REMOTE_PROTOCOL_ERROR',
   'REMOTE_ABORTED',
+  'REMOTE_CAPABILITY_UNSUPPORTED',
 ];
 
 /** Type guard for the {@link RemoteErrorCode} vocabulary. */

@@ -18,25 +18,61 @@
  * otherwise lock every session until it expired.
  */
 import {
+  Capabilities,
   Notifications,
   RemoteError,
   type AttachMode,
+  type PendingInteraction,
+  type PromptContentBlock,
   type SessionAttachParams,
   type SessionAttachResult,
+  type SessionCompactResult,
   type SessionCreateParams,
   type SessionCreateResult,
   type SessionEventEnvelope,
+  type SessionHistoryEntry,
+  type SessionHistoryParams,
+  type SessionHistoryResult,
   type SessionLockedErrorData,
   type SessionStatus,
   type SessionSummary,
+  type WireSessionEvent,
 } from '@dsh-remote/core';
 import type { SessionEvent } from '@dsh-remote/seams';
 import { randomBytes } from 'node:crypto';
 import type {
   AgentHostAccess,
+  AttachmentsHostAccess,
+  CompactionHostAccess,
   HostSession,
+  PersistenceHostAccess,
   SessionHostAccess,
 } from './host.js';
+
+/** Optional v2 subsystems a SessionBroker may be backed by. */
+export interface SessionBrokerExtras {
+  /** Cold-session history reads (`session.history`, `history` capability). */
+  persistence?: PersistenceHostAccess;
+  /** Context compaction (`session.compact`, `compact` capability). */
+  compaction?: CompactionHostAccess;
+  /** Image prompt blocks (`prompt-blocks` capability). */
+  attachments?: AttachmentsHostAccess;
+}
+
+/** Options a caller may pass alongside `session.attach` params. */
+export interface AttachExtras {
+  /**
+   * Outstanding interactions on the session, collected by the server from the
+   * approval/question bridges when the `pending-interactions` capability is
+   * active. Included in the attach result only when non-empty.
+   */
+  pendingInteractions?: PendingInteraction[];
+}
+
+/** Default page size for `session.history` (callers may raise it up to the clamp). */
+const HISTORY_DEFAULT_MAX = 200;
+/** Hard clamp on `session.history` page size. */
+const HISTORY_MAX = 1000;
 
 /** One authenticated frontend connection the broker serves. */
 export interface BrokerConnection {
@@ -59,20 +95,26 @@ interface Lease {
 export class SessionBroker {
   #sessions: SessionHostAccess;
   #agents: AgentHostAccess;
+  #persistence?: PersistenceHostAccess;
+  #compaction?: CompactionHostAccess;
+  #attachments?: AttachmentsHostAccess;
   #connections = new Map<string, BrokerConnection>();
   /** sessionId → attached client ids. */
   #attached = new Map<string, Set<string>>();
   /** clientId → its attachments. */
-  #attachments = new Map<string, Map<string, Attachment>>();
+  #attachmentsByClient = new Map<string, Map<string, Attachment>>();
   /** sessionId → write-control lease (process-local; see module doc). */
   #leases = new Map<string, Lease>();
   /** Sessions with an approval request currently pending. */
   #waitingApproval = new Set<string>();
   #unsubscribeHost: (() => void)[] = [];
 
-  constructor(sessions: SessionHostAccess, agents: AgentHostAccess) {
+  constructor(sessions: SessionHostAccess, agents: AgentHostAccess, extras: SessionBrokerExtras = {}) {
     this.#sessions = sessions;
     this.#agents = agents;
+    this.#persistence = extras.persistence;
+    this.#compaction = extras.compaction;
+    this.#attachments = extras.attachments;
     if (agents.onStatus) {
       this.#unsubscribeHost.push(
         agents.onStatus((agent, status) => {
@@ -100,6 +142,19 @@ export class SessionBroker {
     for (const unsub of this.#unsubscribeHost.splice(0)) unsub();
   }
 
+  /**
+   * Capability bits this broker can honor, derived from the optional
+   * subsystems it was given. `fork-at-seq` is always advertised: the
+   * SessionHostAccess contract requires fork to accept `atSeq`.
+   */
+  get capabilities(): string[] {
+    const caps: string[] = [Capabilities.ForkAtSeq];
+    if (this.#persistence) caps.push(Capabilities.History);
+    if (this.#compaction) caps.push(Capabilities.Compact);
+    if (this.#attachments) caps.push(Capabilities.PromptBlocks);
+    return caps;
+  }
+
   /** Register an authenticated connection. */
   connect(conn: BrokerConnection): void {
     this.#connections.set(conn.clientId, conn);
@@ -110,7 +165,7 @@ export class SessionBroker {
    * every lease it owned (broadcast with reason "disconnected").
    */
   disconnect(clientId: string): void {
-    const mine = this.#attachments.get(clientId);
+    const mine = this.#attachmentsByClient.get(clientId);
     if (mine) {
       for (const sessionId of [...mine.keys()]) this.#dropAttachment(clientId, sessionId);
     }
@@ -165,7 +220,7 @@ export class SessionBroker {
    * tails from "now". Live events arriving during replay are buffered and
    * de-duplicated by seq.
    */
-  attach(clientId: string, params: SessionAttachParams): SessionAttachResult {
+  attach(clientId: string, params: SessionAttachParams, extras: AttachExtras = {}): SessionAttachResult {
     const conn = this.#requireConnection(clientId);
     const session = this.#sessions.get(params.sessionId);
     if (!session) {
@@ -221,6 +276,10 @@ export class SessionBroker {
       sessionId,
       holder: this.#leases.get(sessionId)?.holderId ?? null,
       lastSeq: session.seq - 1,
+      // Absent when nothing is pending or the capability is inactive.
+      ...(extras.pendingInteractions !== undefined && extras.pendingInteractions.length > 0
+        ? { pendingInteractions: extras.pendingInteractions }
+        : {}),
     };
   }
 
@@ -252,18 +311,57 @@ export class SessionBroker {
     return { sessionId: session.id };
   }
 
-  /** `session.prompt`: queue a follow-up turn; write-control holders only. */
-  prompt(clientId: string, sessionId: string, text: string): { messageId: string } {
+  /**
+   * `session.prompt`: queue a follow-up turn; write-control holders only.
+   * With no `content` blocks the message is the byte-identical legacy shape
+   * `content: [{ type: 'text', text }]`; with blocks, images are saved via
+   * the attachments host and referenced from the assembled message.
+   */
+  async prompt(
+    clientId: string,
+    sessionId: string,
+    text: string,
+    content?: PromptContentBlock[],
+  ): Promise<{ messageId: string }> {
     this.#requireHolder(clientId, sessionId);
     const agent = this.#agents.get(sessionId);
     if (!agent) {
       throw new RemoteError('REMOTE_PROTOCOL_ERROR', `no live agent for session "${sessionId}"`);
     }
+    let blocks: unknown[];
+    if (content === undefined) {
+      blocks = [{ type: 'text', text }];
+    } else {
+      blocks = [];
+      for (const block of content) {
+        if (block.type === 'text') {
+          blocks.push({ type: 'text', text: block.text });
+          continue;
+        }
+        if (!this.#attachments) {
+          throw new RemoteError(
+            'REMOTE_CAPABILITY_UNSUPPORTED',
+            'this backend cannot accept image prompt blocks',
+          );
+        }
+        const attachment = await this.#attachments.saveImage({
+          data: Buffer.from(block.data, 'base64'),
+          mediaType: block.mediaType,
+          ...(block.name !== undefined ? { name: block.name } : {}),
+        });
+        blocks.push({
+          type: 'image',
+          mediaType: block.mediaType,
+          ...(block.name !== undefined ? { name: block.name } : {}),
+          attachment,
+        });
+      }
+    }
     const messageId = `remote-${randomBytes(8).toString('hex')}`;
     agent.followup({
       id: messageId,
       role: 'user',
-      content: [{ type: 'text', text }],
+      content: blocks,
       source: { kind: 'user' },
     });
     return { messageId };
@@ -280,18 +378,80 @@ export class SessionBroker {
   }
 
   /** `session.fork`: fork at an optional event boundary; write-control only. */
-  fork(clientId: string, sessionId: string, boundary?: number): { sessionId: string } {
+  fork(clientId: string, sessionId: string, boundary?: number, atSeq?: number): { sessionId: string } {
     this.#requireHolder(clientId, sessionId);
     let child: HostSession;
     try {
-      child = boundary === undefined
-        ? this.#sessions.fork(sessionId)
-        : this.#sessions.fork(sessionId, boundary);
+      child = this.#sessions.fork(sessionId, boundary, atSeq);
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       throw new RemoteError('REMOTE_PROTOCOL_ERROR', `fork failed: ${message}`, { cause: err });
     }
     return { sessionId: child.id };
+  }
+
+  /**
+   * `session.history`: seq-paginated history WITHOUT resuming an agent. Live
+   * sessions are served from their in-memory log; cold sessions go through
+   * the persistence host (absent → REMOTE_CAPABILITY_UNSUPPORTED). Entries
+   * come back ascending by seq; `beforeSeq` is an exclusive upper bound and
+   * `hasMore` is true when older events remain before the first entry.
+   */
+  async history(params: SessionHistoryParams): Promise<SessionHistoryResult> {
+    const live = this.#sessions.get(params.sessionId);
+    let events: readonly SessionEvent[];
+    if (live) {
+      events = live.events;
+    } else {
+      if (!this.#persistence) {
+        throw new RemoteError(
+          'REMOTE_CAPABILITY_UNSUPPORTED',
+          'this backend cannot read cold session history',
+        );
+      }
+      const info = await this.#persistence.inspect(params.sessionId);
+      if (!info) {
+        throw new RemoteError('REMOTE_PROTOCOL_ERROR', `unknown session "${params.sessionId}"`);
+      }
+      events = await this.#persistence.readFrom(params.sessionId);
+    }
+    const limit = Math.min(Math.max(1, params.maxMessages ?? HISTORY_DEFAULT_MAX), HISTORY_MAX);
+    const eligible =
+      params.beforeSeq === undefined ? events : events.filter((event) => event.seq < params.beforeSeq!);
+    const start = Math.max(0, eligible.length - limit);
+    const entries: SessionHistoryEntry[] = eligible.slice(start).map((event) => ({
+      seq: event.seq,
+      event: event as unknown as WireSessionEvent,
+    }));
+    return { entries, hasMore: start > 0 };
+  }
+
+  /**
+   * `session.compact`: compact the live agent's context in place. Requires
+   * write control and a live, IDLE agent — a mid-turn or waiting-approval
+   * session fails with REMOTE_ABORTED (the operation is refused, not queued;
+   * the caller retries when the session goes idle).
+   */
+  async compact(clientId: string, sessionId: string): Promise<SessionCompactResult> {
+    if (!this.#compaction) {
+      throw new RemoteError(
+        'REMOTE_CAPABILITY_UNSUPPORTED',
+        'this backend has no compaction subsystem',
+      );
+    }
+    this.#requireHolder(clientId, sessionId);
+    const agent = this.#agents.get(sessionId);
+    if (!agent) {
+      throw new RemoteError('REMOTE_PROTOCOL_ERROR', `no live agent for session "${sessionId}"`);
+    }
+    if (agent.status !== 'idle' || this.#waitingApproval.has(sessionId)) {
+      throw new RemoteError(
+        'REMOTE_ABORTED',
+        `session "${sessionId}" is busy; compact again when the session is idle`,
+      );
+    }
+    await this.#compaction.compactNow(agent);
+    return { compacted: true };
   }
 
   /** `session.control-release`: the holder voluntarily demotes itself. */
@@ -391,10 +551,10 @@ export class SessionBroker {
   }
 
   #trackAttachment(clientId: string, sessionId: string, unsubscribe: () => void): void {
-    let bySession = this.#attachments.get(clientId);
+    let bySession = this.#attachmentsByClient.get(clientId);
     if (!bySession) {
       bySession = new Map();
-      this.#attachments.set(clientId, bySession);
+      this.#attachmentsByClient.set(clientId, bySession);
     }
     // Re-attach replaces the previous subscription for the same session.
     bySession.get(sessionId)?.unsubscribe();
@@ -408,10 +568,10 @@ export class SessionBroker {
   }
 
   #dropAttachment(clientId: string, sessionId: string): void {
-    const attachment = this.#attachments.get(clientId)?.get(sessionId);
+    const attachment = this.#attachmentsByClient.get(clientId)?.get(sessionId);
     if (!attachment) return;
     attachment.unsubscribe();
-    this.#attachments.get(clientId)?.delete(sessionId);
+    this.#attachmentsByClient.get(clientId)?.delete(sessionId);
     const set = this.#attached.get(sessionId);
     set?.delete(clientId);
     if (set?.size === 0) this.#attached.delete(sessionId);

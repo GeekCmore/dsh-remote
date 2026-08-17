@@ -66,8 +66,13 @@ export interface SessionHostAccess {
    * Upstream `SessionStore.fork(source, boundary?)`: create a live child from
    * a stable prefix of a live source. Throws on unknown source or an invalid
    * boundary; the backend normalizes that to REMOTE_PROTOCOL_ERROR.
+   *
+   * `atSeq` is the protocol's fork-at-seq rewind semantic (keep history up to
+   * and including that seq, drop everything after). Upstream's `boundary`
+   * parameter is already an inclusive event boundary, so the index.ts
+   * narrowing maps `atSeq` onto it when `boundary` is absent.
    */
-  fork(source: string, boundary?: number): HostSession;
+  fork(source: string, boundary?: number, atSeq?: number): HostSession;
   /**
    * Create a fresh live session (`session.create` backing). OPTIONAL: not
    * every host supports ad-hoc session creation; when absent the backend
@@ -92,7 +97,11 @@ export interface SessionHostAccess {
  * A user prompt message as handed to `Agent.followup`. Structurally the
  * upstream `UserMessage` (id + role + content blocks + source); declared
  * loosely here because the dsh-llm types are not installable. The backend
- * builds `{ id, role: 'user', content: [{ type: 'text', text }], source }`.
+ * builds `{ id, role: 'user', content: [{ type: 'text', text }], source }`
+ * for plain-text prompts; structured prompts (`session.prompt` with
+ * `content` blocks) map image blocks to
+ * `{ type: 'image', mediaType, name?, attachment }` where `attachment` is the
+ * reference returned by {@link AttachmentsHostAccess.saveImage}.
  */
 export interface HostUserMessage {
   id: string;
@@ -160,4 +169,131 @@ export interface ApprovalHostAccess {
       next: () => Promise<HostApprovalDecision>,
     ) => Promise<HostApprovalDecision>,
   ): () => void;
+}
+
+/* ------------------------------------------------------------------------ */
+/* Protocol v2 subsystems. All OPTIONAL: when the host lacks the underlying   */
+/* service the narrowing is absent, the capability is not advertised, and a   */
+/* wire call for it fails with REMOTE_CAPABILITY_UNSUPPORTED.                 */
+/* ------------------------------------------------------------------------ */
+
+/**
+ * Cold-session history reads without resuming an agent. Narrows upstream
+ * `ctx.sessionPersistence` (@deepseek-ai/dsh-session-persistence, class
+ * `SessionPersistence`). Members may return promises; the broker awaits
+ * either form.
+ */
+export interface PersistenceHostAccess {
+  /** Upstream `SessionPersistence.inspect(id)`: metadata, undefined when unknown. */
+  inspect(
+    id: string,
+  ): { id: string; lastSeq?: number } | undefined | Promise<{ id: string; lastSeq?: number } | undefined>;
+  /**
+   * Upstream `SessionPersistence.readFrom(id, fromSeq?)`: the persisted event
+   * log starting at `fromSeq` (default 0), in ascending seq order.
+   */
+  readFrom(id: string, fromSeq?: number): readonly SessionEvent[] | Promise<readonly SessionEvent[]>;
+  /** Upstream `SessionPersistence.list()`: every persisted session. */
+  list(): ColdSessionInfo[] | Promise<ColdSessionInfo[]>;
+}
+
+/** One selectable option of a host question item (upstream ask_user_question shape). */
+export interface HostQuestionOption {
+  id: string;
+  label: string;
+  description?: string;
+}
+
+/** One question of a host ask-user-question request. */
+export interface HostQuestionItem {
+  id: string;
+  question: string;
+  multiSelect?: boolean;
+  options: HostQuestionOption[];
+}
+
+/** A question request raised by the host's ask_user_question tool. */
+export interface HostQuestionRequest {
+  /** Session the question belongs to, when the host attributes one. */
+  sessionId?: string;
+  /** Short human-readable summary of why input is needed. */
+  summary?: string;
+  items: HostQuestionItem[];
+}
+
+/** Answer map keyed by item id; values are option ids or free-form text. */
+export type HostQuestionAnswers = Record<string, string | string[]>;
+
+/**
+ * Narrows upstream `ctx.userQuestions`: `registerProvider({ ask })` installs
+ * the ask_user_question provider and returns a disposer. Unlike the approval
+ * waterfall there is no `next()` — the registered provider owns the tool —
+ * so the question bridge is always fail-closed when no frontend can answer.
+ */
+export interface QuestionHostAccess {
+  registerProvider(provider: {
+    ask(request: HostQuestionRequest): Promise<HostQuestionAnswers>;
+  }): () => void;
+}
+
+/** Narrows the read subset of upstream `ctx.llm` used by the models catalog. */
+export interface CatalogLlmAccess {
+  /** Upstream `ctx.llm.listProviders()`. */
+  listProviders(): { id: string }[];
+  /** Upstream `ctx.llm.listModels(providerId)`. */
+  listModels(providerId: string): {
+    id: string;
+    name?: string;
+    reasoningEfforts?: string[];
+    routable?: boolean;
+    current?: boolean;
+  }[];
+}
+
+/** Narrows the read subset of upstream `ctx.skills`. */
+export interface CatalogSkillsAccess {
+  list(): { name: string; description?: string }[];
+}
+
+/** Narrows the read subset of upstream `ctx.agentPresets`. */
+export interface CatalogAgentPresetsAccess {
+  list(): { id: string; name: string; description?: string; isDefault: boolean }[];
+}
+
+/**
+ * Read-only catalogs (`catalog.list`). Each member narrows one upstream
+ * service and is independently optional: a host may have models but no
+ * skills, so absence is reported per kind as REMOTE_CAPABILITY_UNSUPPORTED.
+ */
+export interface CatalogHostAccess {
+  llm?: CatalogLlmAccess;
+  skills?: CatalogSkillsAccess;
+  agentPresets?: CatalogAgentPresetsAccess;
+}
+
+/**
+ * Narrows upstream `ctx.compaction` (@deepseek-ai/dsh-compaction):
+ * `compactNow(agent, signal)` compacts the agent's context in place.
+ */
+export interface CompactionHostAccess {
+  compactNow(agent: HostAgent, signal?: AbortSignal): Promise<unknown>;
+}
+
+/** Reference to an image saved into the host's attachment store. */
+export interface SavedImageAttachment {
+  /** Host-assigned reference (id or path) usable in a message image block. */
+  id: string;
+}
+
+/**
+ * Narrows upstream `ctx.attachments`: `saveImage({ data, mediaType, name? })`
+ * persists image bytes and returns the reference the agent's message content
+ * blocks point at.
+ */
+export interface AttachmentsHostAccess {
+  saveImage(input: {
+    data: Uint8Array;
+    mediaType: string;
+    name?: string;
+  }): Promise<SavedImageAttachment>;
 }

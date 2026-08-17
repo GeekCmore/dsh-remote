@@ -7,17 +7,29 @@
  * The default export is the Cordis service class:
  * `ctx.plugin(DaemonRemoteSessions, { resolveToken })`.
  *
- * The wire vocabulary is exactly core `protocol.ts`: `session.create` /
- * `session.attach` / event envelopes and client identity (backend-assigned in
- * the handshake) all come from there — this package keeps no local protocol
+ * The service is a thin cordis adapter over `@dsh-remote/client`
+ * ({@link RemoteClient} / {@link TargetConnection} / {@link DaemonAgentHandle});
+ * the client types consumers need are re-exported here. The wire vocabulary
+ * is exactly core `protocol.ts` — this package keeps no local protocol
  * literals.
  */
 import { DaemonRemoteSessions } from './daemon-sessions.js';
 
 export { DaemonRemoteSessions } from './daemon-sessions.js';
-export { DaemonAgentHandle } from './handle.js';
-export type { DaemonAgentHandleOptions } from './handle.js';
-export { TargetConnection } from './connection.js';
-export type { SessionSubscriber, TargetConnectionConfig } from './connection.js';
+export {
+  DaemonAgentHandle,
+  RemoteClient,
+  TargetConnection,
+  connectorFromHub,
+} from '@dsh-remote/client';
+export type {
+  DaemonAgentHandleOptions,
+  HubLike,
+  RemoteClientConfig,
+  RemoteClientHandle,
+  SessionSubscriber,
+  TargetConnectionConfig,
+  TargetConnector,
+} from '@dsh-remote/client';
 
 export default DaemonRemoteSessions;

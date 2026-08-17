@@ -15,8 +15,15 @@ import { runServe } from './serve.js';
 import type {
   AgentHostAccess,
   ApprovalHostAccess,
+  AttachmentsHostAccess,
+  CatalogHostAccess,
+  CompactionHostAccess,
   HostAgent,
+  HostQuestionAnswers,
+  HostQuestionRequest,
   HostSession,
+  PersistenceHostAccess,
+  QuestionHostAccess,
   SessionHostAccess,
 } from './host.js';
 
@@ -24,6 +31,7 @@ export const name = 'dsh-remote-backend';
 
 export { SessionBroker } from './broker.js';
 export { ApprovalBridge } from './approval.js';
+export { QuestionBridge } from './question.js';
 export { MonitorCollector } from './monitor.js';
 export type { MonitorSources, MonitorOptions } from './monitor.js';
 export { TransferManager } from './transfer.js';
@@ -52,8 +60,12 @@ function sessionAccessFromContext(ctx: Context): SessionHostAccess {
   return {
     get: (id) => store.get(id),
     list: () => store.list(),
-    fork: (source, boundary) =>
-      boundary === undefined ? store.fork(source) : store.fork(source, boundary),
+    // Upstream `boundary` is already an inclusive event boundary, so the
+    // protocol's fork-at-seq rewind (`atSeq`) maps onto it directly.
+    fork: (source, boundary, atSeq) => {
+      const effective = boundary ?? atSeq;
+      return effective === undefined ? store.fork(source) : store.fork(source, effective);
+    },
     onSessionEvent: (listener) =>
       events.on('session/event', (session, event) =>
         listener(session as unknown as HostSession, event as unknown as SessionEvent),
@@ -98,6 +110,93 @@ function approvalAccessFromContext(ctx: Context): ApprovalHostAccess {
   };
 }
 
+/**
+ * Narrow `ctx.sessionPersistence` (upstream SessionPersistence). OPTIONAL:
+ * returns undefined when the host has no persistence service, in which case
+ * the `history` capability is not advertised.
+ */
+function persistenceAccessFromContext(ctx: Context): PersistenceHostAccess | undefined {
+  const persistence = (ctx as unknown as { sessionPersistence?: unknown }).sessionPersistence as
+    | {
+        inspect(id: string): unknown;
+        readFrom(id: string, fromSeq?: number): unknown;
+        list(): unknown;
+      }
+    | undefined;
+  if (!persistence) return undefined;
+  return {
+    inspect: (id) => persistence.inspect(id) as ReturnType<PersistenceHostAccess['inspect']>,
+    readFrom: (id, fromSeq) =>
+      persistence.readFrom(id, fromSeq) as ReturnType<PersistenceHostAccess['readFrom']>,
+    list: () => persistence.list() as ReturnType<PersistenceHostAccess['list']>,
+  };
+}
+
+/**
+ * Narrow `ctx.userQuestions` (upstream provider registry for
+ * ask_user_question). OPTIONAL: undefined when the host has none.
+ */
+function questionAccessFromContext(ctx: Context): QuestionHostAccess | undefined {
+  const registry = (ctx as unknown as { userQuestions?: unknown }).userQuestions as
+    | {
+        registerProvider(provider: {
+          ask(request: HostQuestionRequest): Promise<HostQuestionAnswers>;
+        }): () => void;
+      }
+    | undefined;
+  if (!registry) return undefined;
+  return {
+    registerProvider: (provider) => registry.registerProvider(provider),
+  };
+}
+
+/**
+ * Narrow the read-only catalog services (`ctx.llm`, `ctx.skills`,
+ * `ctx.agentPresets`). OPTIONAL per member: a host may expose any subset.
+ * Returns undefined when none of the three exist.
+ */
+function catalogAccessFromContext(ctx: Context): CatalogHostAccess | undefined {
+  const source = ctx as unknown as {
+    llm?: CatalogHostAccess['llm'];
+    skills?: CatalogHostAccess['skills'];
+    agentPresets?: CatalogHostAccess['agentPresets'];
+  };
+  const out: CatalogHostAccess = {
+    ...(source.llm !== undefined ? { llm: source.llm } : {}),
+    ...(source.skills !== undefined ? { skills: source.skills } : {}),
+    ...(source.agentPresets !== undefined ? { agentPresets: source.agentPresets } : {}),
+  };
+  return out.llm || out.skills || out.agentPresets ? out : undefined;
+}
+
+/**
+ * Narrow `ctx.compaction` (@deepseek-ai/dsh-compaction). OPTIONAL: undefined
+ * when the host has no compaction service.
+ */
+function compactionAccessFromContext(ctx: Context): CompactionHostAccess | undefined {
+  const compaction = (ctx as unknown as { compaction?: unknown }).compaction as
+    | { compactNow(agent: HostAgent, signal?: AbortSignal): Promise<unknown> }
+    | undefined;
+  if (!compaction) return undefined;
+  return {
+    compactNow: (agent, signal) => compaction.compactNow(agent, signal),
+  };
+}
+
+/**
+ * Narrow `ctx.attachments` (image prompt blocks). OPTIONAL: undefined when
+ * the host has no attachment store.
+ */
+function attachmentsAccessFromContext(ctx: Context): AttachmentsHostAccess | undefined {
+  const attachments = (ctx as unknown as { attachments?: unknown }).attachments as
+    | AttachmentsHostAccess
+    | undefined;
+  if (!attachments) return undefined;
+  return {
+    saveImage: (input) => attachments.saveImage(input),
+  };
+}
+
 export function apply(ctx: Context): void {
   const diag = (msg: string) => {
     try {
@@ -107,10 +206,20 @@ export function apply(ctx: Context): void {
     }
     process.stderr.write(`[dsh-remote-backend] ${msg}\n`);
   };
+  const persistenceHost = persistenceAccessFromContext(ctx);
+  const questionHost = questionAccessFromContext(ctx);
+  const catalogHost = catalogAccessFromContext(ctx);
+  const compactionHost = compactionAccessFromContext(ctx);
+  const attachmentsHost = attachmentsAccessFromContext(ctx);
   void runServe({
     sessions: sessionAccessFromContext(ctx),
     agents: agentAccessFromContext(ctx),
     approvalHost: approvalAccessFromContext(ctx),
+    ...(persistenceHost !== undefined ? { persistenceHost } : {}),
+    ...(questionHost !== undefined ? { questionHost } : {}),
+    ...(catalogHost !== undefined ? { catalogHost } : {}),
+    ...(compactionHost !== undefined ? { compactionHost } : {}),
+    ...(attachmentsHost !== undefined ? { attachmentsHost } : {}),
     diag,
   }).catch((err: unknown) => {
     diag(`serve failed: ${err instanceof Error ? err.message : String(err)}`);

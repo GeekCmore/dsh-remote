@@ -1,0 +1,33 @@
+{
+  "name": "@dsh-remote/client",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Cordis-free dsh-remote daemon-protocol client: per-target daemon channels with pairing handshake, reconnect + seq-cursor resume, and session handles covering the full protocol vocabulary",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@dsh-remote/core": "workspace:*",
+    "@dsh-remote/remote": "workspace:*",
+    "@dsh-remote/seams": "workspace:*"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "typescript": "^5.9.0",
+    "vitest": "^3.2.0"
+  }
+}

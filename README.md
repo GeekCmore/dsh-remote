@@ -21,12 +21,15 @@ Two modes, both transparent to dsh frontends (CLI/TUI/GUI/SDK):
 | `@dsh-remote/remote-ssh` | frontend | ssh2-backed `ctx.remoteHub` provider: `SshRemoteHub` + `SshTransport` |
 | `@dsh-remote/fs-ssh` | frontend | `ctx.fs` provider over SFTP + exec wrapper (live mode) |
 | `@dsh-remote/subprocess-ssh` | frontend | `ctx.subprocess` provider over exec wrapper + PTY (live mode, M2) |
-| `@dsh-remote/remote-sessions` | frontend | `ctx.remoteSessions` service definition: attach/detach vocabulary, agent handle façade (daemon mode) |
-| `@dsh-remote/remote-daemon` | frontend | `ctx.remoteSessions` over the daemon protocol: pairing handshake, reconnect + seq-cursor resume, write leases |
+| `@dsh-remote/remote-sessions` | frontend | `ctx.remoteSessions` service definition: attach/detach vocabulary (re-exports the client handle types) |
+| `@dsh-remote/client` | frontend | Cordis-free daemon client: pairing handshake, reconnect + seq-cursor resume, write leases, capability negotiation, history/fork-at-seq/compact/prompt-blocks, approval & question bridging API |
+| `@dsh-remote/remote-daemon` | frontend | Thin cordis adapter exposing the client as `ctx.remoteSessions` |
+| `@dsh-remote/proxy` | frontend | Remote-backed implementations of the official session seams (`sessions`/`agents`/`sessionPersistence`) — daemon-mode transparency for seam-compliant in-process frontends |
 | `@dsh-remote/remote-frontend` | frontend | Workspace/session management, monitoring, file interop services |
-| `@dsh-remote/remote-backend` | backend | Remote agent plugin: session broker, approval bridge, control lease, monitor, transfer endpoints |
+| `@dsh-remote/remote-backend` | backend | Remote agent plugin: session broker, approval + question bridges, control lease, monitor, transfer endpoints, history/compact/catalog endpoints |
 | `@dsh-remote/bundle-live` | profile | dsh profile bundle: live mode — disables the local fs/subprocess backends, mounts the SSH providers |
 | `@dsh-remote/bundle-daemon` | profile | dsh profile bundle: daemon-mode frontend — mounts hub + daemon sessions + transfer/monitor |
+| `@dsh-remote/bundle-daemon-tui` | profile | dsh profile bundle: daemon mode for seam-compliant TUIs — replaces the local session/agent/persistence rows with the remote-backed proxy |
 
 ## Remote target requirements
 
@@ -70,6 +73,7 @@ pnpm install
 pnpm build        # all packages, topological order
 pnpm test
 pnpm typecheck
+pnpm verify:contract   # diff vendored seams against the pinned upstream dsh version
 ```
 
 Integration tests use a throwaway sshd container:

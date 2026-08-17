@@ -1,11 +1,16 @@
 import { describe, expect, it } from 'vitest';
-import { Methods, Notifications, PROTOCOL_VERSION } from '../src/index.js';
+import {
+  Capabilities,
+  isRemoteErrorCode,
+  Methods,
+  Notifications,
+  PROTOCOL_VERSION,
+} from '../src/index.js';
 
 describe('protocol vocabulary', () => {
   it('pins the v1 method and notification names', () => {
     expect(PROTOCOL_VERSION).toBe(1);
     expect(Methods.Hello).toBe('hello');
-    expect(Methods.HelloChallenge).toBe('hello.challenge');
     expect(Methods.HelloProof).toBe('hello.proof');
     expect(Methods.SessionList).toBe('session.list');
     expect(Methods.SessionCreate).toBe('session.create');
@@ -15,8 +20,13 @@ describe('protocol vocabulary', () => {
     expect(Methods.SessionPrompt).toBe('session.prompt');
     expect(Methods.SessionCancel).toBe('session.cancel');
     expect(Methods.SessionFork).toBe('session.fork');
+    expect(Methods.SessionHistory).toBe('session.history');
+    expect(Methods.SessionCompact).toBe('session.compact');
     expect(Methods.ApprovalRequest).toBe('approval.request');
     expect(Methods.ApprovalAnswer).toBe('approval.answer');
+    expect(Methods.QuestionRequest).toBe('question.request');
+    expect(Methods.QuestionAnswer).toBe('question.answer');
+    expect(Methods.CatalogList).toBe('catalog.list');
     expect(Methods.MonitorSubscribe).toBe('monitor.subscribe');
     expect(Methods.MonitorUnsubscribe).toBe('monitor.unsubscribe');
     expect(Methods.TransferOpen).toBe('transfer.open');
@@ -25,5 +35,20 @@ describe('protocol vocabulary', () => {
     expect(Notifications.SessionControlChanged).toBe('session.control-changed');
     expect(Notifications.MonitorMetrics).toBe('monitor.metrics');
     expect(Notifications.ApprovalClosed).toBe('approval.closed');
+    expect(Notifications.QuestionClosed).toBe('question.closed');
+  });
+
+  it('pins the capability bit literals', () => {
+    expect(Capabilities.History).toBe('history');
+    expect(Capabilities.Compact).toBe('compact');
+    expect(Capabilities.ForkAtSeq).toBe('fork-at-seq');
+    expect(Capabilities.Questions).toBe('questions');
+    expect(Capabilities.PromptBlocks).toBe('prompt-blocks');
+    expect(Capabilities.Catalogs).toBe('catalogs');
+    expect(Capabilities.PendingInteractions).toBe('pending-interactions');
+  });
+
+  it('pins the appended error code', () => {
+    expect(isRemoteErrorCode('REMOTE_CAPABILITY_UNSUPPORTED')).toBe(true);
   });
 });

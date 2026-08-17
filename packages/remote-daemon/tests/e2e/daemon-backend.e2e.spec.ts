@@ -1,29 +1,38 @@
 /**
  * End-to-end reconciliation tests: the REAL `DaemonRemoteSessions` frontend
- * stack (service → TargetConnection → JsonRpcPeer → handshake/reconnect) over
- * in-memory BytePipes against a REAL `BackendServer` (remote-backend serve
- * logic with SessionBroker/ApprovalBridge/MonitorCollector over in-memory
- * host fakes). Nothing on the wire is faked: real JSON-RPC framing, real
- * HMAC pairing handshake, real broker leases and replay.
+ * stack (service → RemoteClient → TargetConnection → JsonRpcPeer →
+ * handshake/reconnect) over in-memory BytePipes against a REAL
+ * `BackendServer` (remote-backend serve logic with SessionBroker/
+ * ApprovalBridge/MonitorCollector over in-memory host fakes). Nothing on the
+ * wire is faked: real JSON-RPC framing, real HMAC pairing handshake, real
+ * broker leases and replay.
  *
- * Coverage: handshake (token match/mismatch), list → read attach → live
- * event stream (single seams-shaped envelope end to end), write attach →
- * prompt → agent events → cancel, second-client lock + force preemption,
- * drop → sinceSeq resume without gaps/dups, approval request/answer
- * round-trip, and monitor.subscribe metrics notifications.
+ * Coverage: handshake (token match/mismatch, capability recording), list →
+ * read attach → live event stream (single seams-shaped envelope end to end),
+ * write attach → prompt → agent events → cancel, second-client lock + force
+ * preemption, drop → sinceSeq resume without gaps/dups, approval
+ * request/answer round-trip through the public handle API, question wiring +
+ * pendingInteractions replay (when the backend advertises the capabilities),
+ * and monitor.subscribe metrics notifications.
+ *
+ * Protocol v2 note: the e2e backend (`@dsh-remote/backend`) is brought up to
+ * v2 independently; until it advertises a capability, the client's fail-fast
+ * REMOTE_CAPABILITY_UNSUPPORTED path is what this spec asserts.
  */
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { Context } from '@deepseek-ai/cordis';
 import {
+  Capabilities,
   Methods,
   Notifications,
   type ApprovalClosedNotification,
   type ApprovalRequestParams,
   type MonitorMetricsNotification,
+  type QuestionRequestParams,
 } from '@dsh-remote/core';
 import type { ControlChangeReason, RemoteAgentStatus } from '@dsh-remote/sessions';
 import type { SessionEvent } from '@dsh-remote/seams';
-import { DaemonRemoteSessions, TargetConnection } from '../../src/index.js';
+import { DaemonRemoteSessions, type TargetConnection } from '../../src/index.js';
 import { BackendRig, E2E_TOKEN, RigRemoteHub } from './real-backend-hub.js';
 
 const REF = 'tok-ref';
@@ -67,12 +76,9 @@ function track(setup: Setup): Setup {
   return setup;
 }
 
-/** Reach the live channel of a connected service (test-only introspection). */
-function connOf(sessions: DaemonRemoteSessions, targetId = 't1'): TargetConnection {
-  const conns = (sessions as unknown as { conns: Map<string, TargetConnection> }).conns;
-  const conn = conns.get(targetId);
-  if (!conn) throw new Error('no daemon channel yet');
-  return conn;
+/** The live channel of a connected service, via the PUBLIC client accessor. */
+function connOf(sessions: DaemonRemoteSessions, targetId = 't1'): Promise<TargetConnection> {
+  return sessions.client.connection(targetId);
 }
 
 describe('e2e handshake', () => {
@@ -91,7 +97,12 @@ describe('e2e handshake', () => {
     ]);
     expect(s.hub.connectCalls).toBe(1);
     // Client identity is backend-assigned: the frontend adopted the server's id.
-    expect(connOf(s.sessions).clientId).toBe('client-1');
+    const conn = await connOf(s.sessions);
+    expect(conn.clientId).toBe('client-1');
+    // The handshake challenge's capability set was recorded (contents depend
+    // on the backend revision; the recording itself is the contract).
+    expect(s.sessions.client.capabilitiesOf('t1')).toBeDefined();
+    expect(s.sessions.client.capabilitiesOf('t1')).toBe(conn.capabilities);
   });
 
   it('rejects with REMOTE_AUTH_FAILED when the token does not match', async () => {
@@ -261,8 +272,8 @@ describe('e2e reconnect / resume', () => {
 
     // A fresh handshake assigned a new client id; the write lease was
     // re-acquired by the re-attach and prompting works again.
-    await vi.waitFor(() => {
-      const conn = connOf(s.sessions);
+    await vi.waitFor(async () => {
+      const conn = await connOf(s.sessions);
       expect(conn.connected).toBe(true);
       expect(conn.clientId).toBe('client-2');
     });
@@ -276,17 +287,14 @@ describe('e2e reconnect / resume', () => {
 });
 
 describe('e2e approval waterfall', () => {
-  it('host approval.request reaches the write holder; the answer resolves the waterfall', async () => {
+  it('host approval.request reaches the write holder through handle.onApproval; handle.answerApproval resolves the waterfall', async () => {
     const s = track(await setup());
     s.rig.sessions.add('s1');
     s.rig.agents.add('s1');
     const handle = await s.sessions.attach('t1', 's1', { mode: 'write' });
-    const conn = connOf(s.sessions);
 
     const requests: ApprovalRequestParams[] = [];
-    conn.onDaemonNotification(Methods.ApprovalRequest, (p) =>
-      requests.push(p as ApprovalRequestParams),
-    );
+    handle.onApproval((req) => requests.push(req));
 
     const raised = s.rig.approvalHost.raise({
       sessionId: 's1',
@@ -306,11 +314,7 @@ describe('e2e approval waterfall', () => {
 
     const decision = await Promise.all([
       raised,
-      conn.call(Methods.ApprovalAnswer, {
-        requestId: requests[0]!.requestId,
-        decision: 'approve',
-        note: 'looks safe',
-      }),
+      handle.answerApproval(requests[0]!.requestId, 'approve', 'looks safe'),
     ]).then(([d]) => d);
     expect(decision).toEqual({ decision: 'approve', note: 'looks safe' });
     // The waterfall owned the request; the host-local fallback never ran.
@@ -323,46 +327,178 @@ describe('e2e approval waterfall', () => {
     const a = track(await setup({ rig }));
     const b = track(await setup({ rig }));
     rig.sessions.add('s1');
-    await a.sessions.attach('t1', 's1', { mode: 'write' });
-    await b.sessions.attach('t1', 's1'); // read
-    const connA = connOf(a.sessions);
-    const connB = connOf(b.sessions);
+    const ha = await a.sessions.attach('t1', 's1', { mode: 'write' });
+    const hb = await b.sessions.attach('t1', 's1'); // read
 
     const requestsA: ApprovalRequestParams[] = [];
     const requestsB: ApprovalRequestParams[] = [];
     const closedB: ApprovalClosedNotification[] = [];
-    connA.onDaemonNotification(Methods.ApprovalRequest, (p) => requestsA.push(p as ApprovalRequestParams));
-    connB.onDaemonNotification(Methods.ApprovalRequest, (p) => requestsB.push(p as ApprovalRequestParams));
-    connB.onDaemonNotification(Notifications.ApprovalClosed, (p) =>
+    ha.onApproval((req) => requestsA.push(req));
+    hb.onApproval((req) => requestsB.push(req));
+    (await connOf(b.sessions)).onDaemonNotification(Notifications.ApprovalClosed, (p) =>
       closedB.push(p as ApprovalClosedNotification),
     );
 
     // With a write holder, ONLY the holder is asked.
     const raised = rig.approvalHost.raise({ sessionId: 's1', kind: 'exec', summary: 'x' });
     await vi.waitFor(() => expect(requestsA).toHaveLength(1));
-    await Promise.all([
-      raised,
-      connA.call(Methods.ApprovalAnswer, { requestId: requestsA[0]!.requestId, decision: 'deny' }),
-    ]);
+    await Promise.all([raised, ha.answerApproval(requestsA[0]!.requestId, 'deny')]);
     expect(requestsB).toHaveLength(0);
     expect(closedB).toHaveLength(0);
 
     // After release, a request is broadcast; the first answer wins and the
     // other client receives approval.closed naming the winner.
-    await connA.call(Methods.SessionControlRelease, { sessionId: 's1' });
+    await ha.releaseControl();
     requestsA.length = 0;
     const raised2 = rig.approvalHost.raise({ sessionId: 's1', kind: 'fs-write', summary: 'y' });
     await vi.waitFor(() => expect(requestsA).toHaveLength(1));
     await vi.waitFor(() => expect(requestsB).toHaveLength(1));
-    await Promise.all([
-      raised2,
-      connA.call(Methods.ApprovalAnswer, { requestId: requestsA[0]!.requestId, decision: 'approve' }),
-    ]);
+    await Promise.all([raised2, ha.answerApproval(requestsA[0]!.requestId, 'approve')]);
     await vi.waitFor(() =>
       expect(closedB).toEqual([
         { requestId: requestsA[0]!.requestId, decision: 'approve', winner: 'client-1' },
       ]),
     );
+    // The closed notification also cleared B's pending set: a fresh subscriber
+    // sees nothing to answer.
+    const late: ApprovalRequestParams[] = [];
+    hb.onApproval((req) => late.push(req));
+    expect(late).toEqual([]);
+  });
+});
+
+describe('e2e protocol v2', () => {
+  it('history / compact / fork atSeq: real round trip when advertised, fail-fast otherwise', async () => {
+    const s = track(await setup());
+    const session = s.rig.sessions.add('s1');
+    s.rig.agents.add('s1');
+    s.rig.sessions.emit('s1', 'output', { n: 1 });
+    s.rig.sessions.emit('s1', 'output', { n: 2 });
+    const handle = await s.sessions.attach('t1', 's1', { mode: 'write' });
+    const caps = s.sessions.client.capabilitiesOf('t1')!;
+
+    if (!caps.has(Capabilities.History)) {
+      // Backend predates v2: capability-gated calls fail fast, no round trip.
+      await expect(handle.history()).rejects.toMatchObject({
+        code: 'REMOTE_CAPABILITY_UNSUPPORTED',
+      });
+      await expect(handle.compact()).rejects.toMatchObject({
+        code: 'REMOTE_CAPABILITY_UNSUPPORTED',
+      });
+      await expect(handle.fork({ atSeq: 0 })).rejects.toMatchObject({
+        code: 'REMOTE_CAPABILITY_UNSUPPORTED',
+      });
+      return;
+    }
+
+    const page = await handle.history({ maxMessages: 1 });
+    expect(page.entries).toHaveLength(1);
+    expect(page.entries[0]!.seq).toBe(1);
+    expect(page.hasMore).toBe(true);
+    const older = await handle.history({ beforeSeq: 1 });
+    expect(older.entries.map((e) => e.seq)).toEqual([0]);
+    expect(older.hasMore).toBe(false);
+
+    await expect(handle.compact()).resolves.toEqual({ compacted: expect.any(Boolean) });
+
+    const { sessionId: forkId } = await handle.fork({ atSeq: 0 });
+    expect(forkId).not.toBe('s1');
+    expect(forkId).not.toBe(session.id);
+    const forkHandle = await s.sessions.attach('t1', forkId);
+    expect(forkHandle.lastSeq).toBe(0);
+  });
+
+  it('structured prompt content blocks reach agent.followup when advertised', async () => {
+    const s = track(await setup());
+    s.rig.sessions.add('s1');
+    const agent = s.rig.agents.add('s1');
+    const handle = await s.sessions.attach('t1', 's1', { mode: 'write' });
+    const caps = s.sessions.client.capabilitiesOf('t1')!;
+    const content = [
+      { type: 'text' as const, text: 'with image' },
+      { type: 'image' as const, mediaType: 'image/png', data: 'aGVsbG8=' },
+    ];
+
+    if (!caps.has(Capabilities.PromptBlocks)) {
+      await expect(handle.prompt({ text: 'with image', content })).rejects.toMatchObject({
+        code: 'REMOTE_CAPABILITY_UNSUPPORTED',
+      });
+      return;
+    }
+
+    const res = await handle.prompt({ text: 'with image', content });
+    expect(res.messageId).toMatch(/^remote-/);
+    expect(agent.prompts[0]).toMatchObject({ id: res.messageId, role: 'user' });
+    // The content blocks crossed the wire: text verbatim, image bytes saved
+    // into the host attachment store and referenced by id.
+    const got = agent.prompts[0]!.content as unknown[];
+    expect(got).toHaveLength(2);
+    expect(got[0]).toMatchObject({ type: 'text', text: 'with image' });
+    expect(got[1]).toMatchObject({ type: 'image', mediaType: 'image/png', attachment: { id: 'att-1' } });
+    expect(s.rig.attachments.saved).toHaveLength(1);
+    expect(s.rig.attachments.saved[0]).toMatchObject({ mediaType: 'image/png' });
+    expect(Buffer.from(s.rig.attachments.saved[0]!.data).toString()).toBe('hello');
+  });
+
+  it('question.request/answer round trip; pendingInteractions replay on attach', async () => {
+    const s = track(await setup());
+    s.rig.sessions.add('s1');
+    s.rig.agents.add('s1');
+    const handle = await s.sessions.attach('t1', 's1');
+    const caps = s.sessions.client.capabilitiesOf('t1')!;
+
+    if (!caps.has(Capabilities.Questions)) {
+      expect(() => handle.onQuestion(() => {})).toThrowError(
+        expect.objectContaining({ code: 'REMOTE_CAPABILITY_UNSUPPORTED' }),
+      );
+      return;
+    }
+
+    // Pending BEFORE a second client attaches: replayed via pendingInteractions
+    // (requires the pending-interactions capability).
+    const raised = s.rig.questionHost.ask({
+      sessionId: 's1',
+      summary: 'pick one',
+      items: [{ id: 'choice', question: 'Pick one', options: [{ id: 'a', label: 'A' }] }],
+    });
+    const questions: QuestionRequestParams[] = [];
+    handle.onQuestion((req) => questions.push(req));
+    await vi.waitFor(() => expect(questions).toHaveLength(1));
+    expect(questions[0]).toMatchObject({ sessionId: 's1', summary: 'pick one' });
+
+    if (caps.has(Capabilities.PendingInteractions)) {
+      const b = track(await setup({ rig: s.rig }));
+      const hb = await b.sessions.attach('t1', 's1');
+      const replayed: QuestionRequestParams[] = [];
+      hb.onQuestion((req) => replayed.push(req));
+      expect(replayed.map((r) => r.questionId)).toEqual([questions[0]!.questionId]);
+    }
+
+    const answers = await Promise.all([
+      raised,
+      handle.answerQuestion(questions[0]!.questionId, { choice: 'a' }),
+    ]).then(([a]) => a);
+    expect(answers).toEqual({ choice: 'a' });
+  });
+
+  it('catalog.list returns real catalogs when advertised, fail-fast otherwise', async () => {
+    const s = track(await setup());
+    s.rig.sessions.add('s1');
+    await s.sessions.attach('t1', 's1');
+    const caps = s.sessions.client.capabilitiesOf('t1')!;
+    if (!caps.has(Capabilities.Catalogs)) {
+      await expect(s.sessions.client.listCatalog('t1', 'models')).rejects.toMatchObject({
+        code: 'REMOTE_CAPABILITY_UNSUPPORTED',
+      });
+      return;
+    }
+    const models = await s.sessions.client.listCatalog('t1', 'models');
+    expect(models.kind).toBe('models');
+    expect(Array.isArray(models.providers)).toBe(true);
+    const skills = await s.sessions.client.listCatalog('t1', 'skills');
+    expect(skills.kind).toBe('skills');
+    const presets = await s.sessions.client.listCatalog('t1', 'agentPresets');
+    expect(presets.kind).toBe('agentPresets');
   });
 });
 
@@ -371,7 +507,7 @@ describe('e2e monitor', () => {
     const s = track(await setup());
     s.rig.sessions.add('s1');
     await s.sessions.attach('t1', 's1');
-    const conn = connOf(s.sessions);
+    const conn = await connOf(s.sessions);
 
     const samples: MonitorMetricsNotification[] = [];
     conn.onDaemonNotification(Notifications.MonitorMetrics, (p) =>

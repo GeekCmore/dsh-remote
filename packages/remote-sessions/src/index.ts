@@ -16,18 +16,51 @@
  *   re-attaches with its {@link RemoteAgentHandle.lastSeq} cursor so the
  *   backend replays exactly the events that were missed.
  *
- * Definition only: the abstract {@link RemoteSessions} class, the
- * {@link RemoteAgentHandle} façade, the summary/option vocabulary, and the
- * `Context`/`Events` augmentation. The daemon-protocol implementation lives
- * in `@dsh-remote/remote-daemon`.
+ * The handle/summary/option vocabulary is DECLARED in `@dsh-remote/client`
+ * (pure TypeScript, cordis-free, single source of truth) and re-exported
+ * here; this package adds only the cordis pieces: the `Context`/`Events`
+ * augmentation and the abstract {@link RemoteSessions} Service. The
+ * cordis-free client implementation lives in `@dsh-remote/client`; the cordis
+ * adapter in `@dsh-remote/remote-daemon`.
  */
 
 import { Context, Service } from '@deepseek-ai/cordis';
 import type { RemoteError } from '@dsh-remote/core';
-import type { SessionEvent } from '@dsh-remote/seams';
+import type {
+  AttachOptions,
+  CreateRemoteSessionOptions,
+  RemoteAgentHandle,
+  RemoteSessionSummary,
+} from '@dsh-remote/client';
 
 export type { ControlChangeReason } from '@dsh-remote/core';
-import type { ControlChangeReason } from '@dsh-remote/core';
+export type {
+  AgentPresetSummary,
+  ApprovalRequestParams,
+  AttachOptions,
+  CatalogKind,
+  CatalogListResult,
+  CatalogModel,
+  CreateRemoteSessionOptions,
+  ForkOptions,
+  HistoryEntry,
+  HistoryOptions,
+  HistoryPage,
+  ModelProviderGroup,
+  PendingInteraction,
+  PromptContentBlock,
+  PromptInput,
+  QuestionAnswers,
+  QuestionItem,
+  QuestionOption,
+  QuestionRequestParams,
+  RemoteAgentHandle,
+  RemoteAgentStatus,
+  RemoteAttachMode,
+  RemoteSessionState,
+  RemoteSessionSummary,
+  SkillSummary,
+} from '@dsh-remote/client';
 
 declare module '@deepseek-ai/cordis' {
   interface Context {
@@ -43,127 +76,6 @@ declare module '@deepseek-ai/cordis' {
      */
     'remote/sessions-changed'(targetId: string): void;
   }
-}
-
-/** Attach mode: `read` tails events, `write` additionally takes the control lease. */
-export type RemoteAttachMode = 'read' | 'write';
-
-/** Lifecycle state of a remote session as seen by the frontend. */
-export type RemoteSessionState =
-  /** A live agent runtime backs the session right now. */
-  | 'active'
-  /** The session exists (persisted) but no live runtime is driving it. */
-  | 'cold';
-
-/** Coarse agent activity of one attached session. */
-export type RemoteAgentStatus = 'running' | 'idle';
-
-/**
- * One remote session as returned by {@link RemoteSessions.list}.
- */
-export interface RemoteSessionSummary {
-  sessionId: string;
-  /** Human-readable title, when the backend tracks one. */
-  title?: string;
-  /**
-   * Epoch milliseconds when the session was created. Backends that do not
-   * report creation time yield `0`.
-   */
-  createdAt: number;
-  /** Working directory of the session, when known. */
-  cwd?: string;
-  state: RemoteSessionState;
-  /** At least one client is currently attached. */
-  attached: boolean;
-  /** Opaque id of the current write-control holder, when control is taken. */
-  controller?: string;
-}
-
-/** Options for {@link RemoteSessions.attach}. */
-export interface AttachOptions {
-  /**
-   * `read` (default) subscribes to the event stream; `write` additionally
-   * takes the session's write-control lease, enabling {@link RemoteAgentHandle.prompt}.
-   */
-  mode?: RemoteAttachMode;
-  /**
-   * Preempt the current write-control holder. Only meaningful with
-   * `mode: 'write'`; without it, attaching a write-controlled session fails
-   * with `REMOTE_SESSION_LOCKED`.
-   */
-  force?: boolean;
-}
-
-/** Options for {@link RemoteSessions.create}. */
-export interface CreateRemoteSessionOptions {
-  /** Working directory for the new session (backend default when omitted). */
-  cwd?: string;
-  /** Human-readable title for the new session. */
-  title?: string;
-}
-
-/**
- * Frontend façade over one attached remote agent session (tmux semantics).
- *
- * A handle is a local projection: the remote session outlives it. Dropping
- * the channel does not invalidate the handle — the implementation re-attaches
- * with `sinceSeq = lastSeq` and resumes delivery — but {@link detach} is
- * terminal and only ever detaches THIS client; the remote session is
- * unaffected.
- *
- * All `on*` registrations return an unsubscribe function.
- */
-export interface RemoteAgentHandle {
-  /** Session this handle is attached to. */
-  readonly sessionId: string;
-  /**
-   * Current attach mode. Starts as requested at attach time; downgrades to
-   * `'read'` when the write lease is lost (preempted, released, or the holder
-   * disconnected) and upgrades back on a successful write re-attach.
-   */
-  readonly mode: RemoteAttachMode;
-  /**
-   * Highest event seq delivered to (or skipped by) this handle. Doubles as
-   * the reattach cursor: after a reconnect the backend replays from here, and
-   * already-delivered seqs are de-duplicated before reaching `onEvent`.
-   */
-  readonly lastSeq: number;
-
-  /**
-   * Send prompt text to the session. Requires write control.
-   * @returns the id the backend assigned to the submitted message.
-   * @throws {@link RemoteError} `REMOTE_SESSION_LOCKED` when this handle holds
-   *   no write control; `REMOTE_CONN_LOST` while the channel is down.
-   */
-  prompt(text: string): Promise<{ messageId: string }>;
-
-  /** Cancel the in-flight turn of the session. */
-  cancel(): Promise<void>;
-
-  /**
-   * Voluntarily release the write-control lease without detaching; the handle
-   * downgrades to `mode: 'read'`. No-op for read-mode handles.
-   */
-  releaseControl(): Promise<void>;
-
-  /**
-   * Detach this client. Terminal for the handle; the remote session keeps
-   * running and can be re-attached via {@link RemoteSessions.attach}.
-   */
-  detach(): Promise<void>;
-
-  /** Coarse current agent activity. Unaffected by reconnects. */
-  status(): RemoteAgentStatus;
-
-  /** Subscribe to session events, delivered in seq order, de-duplicated. */
-  onEvent(cb: (e: SessionEvent) => void): () => void;
-  /** Subscribe to coarse status changes. */
-  onStatus(cb: (status: RemoteAgentStatus) => void): () => void;
-  /**
-   * Subscribe to write-control changes: `holder` is the new holder's opaque
-   * client id (`null` when control is free) and `reason` says why it changed.
-   */
-  onControlChanged(cb: (holder: string | null, reason: ControlChangeReason) => void): () => void;
 }
 
 /**

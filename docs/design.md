@@ -72,6 +72,17 @@ The daemon channel is an SSH **exec process** running
 vocabulary) rides its stdio. No TCP listener — the attack surface is SSH
 itself.
 
+Protocol v2 (additive on top of v1): `session.history` (seq-paginated,
+never resumes an agent), `session.fork {atSeq}` (the only time-travel
+semantic — upstream logs are append-only, there is no truncate API),
+`session.compact`, content-block prompts (images via remote
+`ctx.attachments`), the `question.request/answer/closed` trio (mirroring
+approvals), `catalog.list` (models/skills/agentPresets), and
+`pendingInteractions` replay in the attach result. The handshake
+advertises capability bits (`Capabilities` in `remote-core/src/auth.ts`);
+absent capability → `REMOTE_CAPABILITY_UNSUPPORTED`. Wire evolution is
+additive-only, golden-tested in `remote-core/tests/protocol.spec.ts`.
+
 **Pairing authentication** (inside `hello`, on top of SSH auth):
 
 1. F→B `hello`: protocol version, capabilities, client nonce.
@@ -103,8 +114,20 @@ identity on the wire (leases name it; nothing is self-chosen).
 **Resume**: `attach(sinceSeq = lastSeenSeq)` replays from the cursor after
 reconnect; subscribers re-attach automatically (duplicates dropped). The
 backend also bridges `approval/request` to the write frontend (broadcast to
-readers when no writer; fail-closed when nobody is attached), and serves
-monitor probes and transfer endpoints off the critical path.
+readers when no writer; fail-closed when nobody is attached) — and likewise
+`userQuestions` asks via the `question.*` trio — and serves monitor probes
+and transfer endpoints off the critical path. History, compaction, and
+read-only catalogs are served from the remote host's own services
+(`sessionPersistence`, `ctx.compaction`, `ctx.llm/skills/agentPresets`)
+through narrow structural interfaces (`remote-backend/src/host.ts`).
+
+Frontend transparency: `@dsh-remote/proxy` re-provides the official session
+seams (`sessions`/`agents`/`sessionPersistence`) backed by
+`@dsh-remote/client`, mounting the real upstream Service classes and
+replaying the remote log into genuine local `Session` instances; remote
+approvals/questions are surfaced through the LOCAL `approval`/`userQuestions`
+services so existing frontend panels answer them unchanged. Composition:
+`@dsh-remote/bundle-daemon-tui`. See `docs/frontend-connection-api.md`.
 
 ## Trade-offs (settled)
 

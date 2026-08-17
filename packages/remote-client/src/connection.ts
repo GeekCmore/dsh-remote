@@ -1,8 +1,9 @@
 /**
  * One daemon channel to a target: the `dsh-remote-backend serve` exec process
- * spawned through the target's {@link RemoteTransport}, the {@link JsonRpcPeer}
- * riding its stdin/stdout, the pairing-token handshake, and the reconnect loop
- * that re-attaches subscribers from their seq cursors.
+ * spawned through the target's transport (resolved via a structural
+ * {@link TargetConnector}), the {@link JsonRpcPeer} riding its stdin/stdout,
+ * the pairing-token handshake, and the reconnect loop that re-attaches
+ * subscribers from their seq cursors.
  *
  * Reconnect policy: when the byte stream drops, the channel retries with
  * exponential backoff (`reconnectInitialDelayMs` doubling up to
@@ -12,8 +13,15 @@
  * `sinceSeq = <their cursor>` after the next successful open, so replayed
  * events resume exactly where delivery stopped (duplicates are dropped by the
  * subscriber).
+ *
+ * Capabilities: the handshake advertises this client's feature set
+ * (`config.capabilities`, the `hello` message) and records the set the
+ * backend answers with ({@link capabilities}); feature calls against a
+ * backend that does not advertise the matching bit fail fast locally with
+ * REMOTE_CAPABILITY_UNSUPPORTED instead of making a doomed round trip.
  */
 import {
+  Capabilities,
   JsonRpcPeer,
   Methods,
   Notifications,
@@ -32,7 +40,8 @@ import {
   type SessionStatus,
   type SessionStatusNotification,
 } from '@dsh-remote/core';
-import type { ExecProcess, RemoteHub } from '@dsh-remote/remote';
+import type { ExecProcess } from '@dsh-remote/remote';
+import type { TargetConnector } from './connector.js';
 
 /** A per-session subscriber (one attached handle) of a {@link TargetConnection}. */
 export interface SessionSubscriber {
@@ -42,11 +51,16 @@ export interface SessionSubscriber {
   handleEvent(env: SessionEventEnvelope): void;
   handleStatus(status: SessionStatus): void;
   handleControl(holder: string | null, reason: ControlChangeReason): void;
+  /**
+   * The post-reconnect re-attach succeeded; `result` carries the session head
+   * seq and any `pendingInteractions` still outstanding (to be replayed).
+   */
+  onReattached?(result: SessionAttachResult): void;
   /** The post-reconnect re-attach failed; tear down locally. */
   onReattachFailed(err: unknown): void;
 }
 
-/** Resolved per-connection configuration (see `DaemonRemoteSessions.Config`). */
+/** Resolved per-connection configuration (see `RemoteClientConfig`). */
 export interface TargetConnectionConfig {
   /** Resolve a pairing-token reference to the token itself. */
   resolveToken: (ref: string) => Promise<string>;
@@ -55,6 +69,8 @@ export interface TargetConnectionConfig {
   reconnectInitialDelayMs: number;
   reconnectMaxDelayMs: number;
   reconnectMaxAttempts: number;
+  /** Feature bits advertised in the handshake hello (defaults to the full known set). */
+  capabilities: string[];
   /** Called when a session reports status `ended` (for sessions-changed fanout). */
   onSessionEnded?: (sessionId: string) => void;
 }
@@ -71,12 +87,14 @@ export class TargetConnection {
   private attempts = 0;
   private disposed = false;
   #clientId = '';
+  /** Capability bits the backend advertised in its handshake challenge. */
+  #capabilities = new Set<string>();
   private readonly subscribers = new Map<string, Set<SessionSubscriber>>();
   /** Extra notification handlers (approval/monitor/test hooks); re-registered on every peer. */
   private readonly notificationHandlers = new Map<string, Set<(params: unknown) => void>>();
 
   constructor(
-    private readonly hub: RemoteHub,
+    private readonly connector: TargetConnector,
     readonly targetId: string,
     private readonly config: TargetConnectionConfig,
   ) {
@@ -86,6 +104,15 @@ export class TargetConnection {
   /** Backend-assigned id of the current connection's client; changes on every reconnect. */
   get clientId(): string {
     return this.#clientId;
+  }
+
+  /**
+   * Capability bits the backend advertised in the handshake challenge
+   * (empty for backends that predate capability negotiation). Valid once
+   * connected; reset on every reconnect.
+   */
+  get capabilities(): ReadonlySet<string> {
+    return this.#capabilities;
   }
 
   /**
@@ -175,6 +202,7 @@ export class TargetConnection {
     this.peer = undefined;
     this.proc = undefined;
     this.#clientId = '';
+    this.#capabilities = new Set();
     if (peer) {
       await Promise.all(
         [...this.subscribers.keys()].map((sessionId) =>
@@ -224,7 +252,7 @@ export class TargetConnection {
       throw new RemoteError('REMOTE_CONN_LOST', `target "${this.targetId}": connection is closed`);
     }
     const gen = this.gen;
-    const transport = await this.hub.connect(this.targetId);
+    const transport = await this.connector.connect(this.targetId);
     const proc = await transport.exec(this.config.backendCommand);
     // Drain stderr so a chatty backend can never back-pressure the channel.
     void (async () => {
@@ -232,8 +260,9 @@ export class TargetConnection {
     })().catch(() => undefined);
     const peer = new JsonRpcPeer({ send: (line) => proc.write(line) }, proc.stdout);
     let clientId: string;
+    let capabilities: string[];
     try {
-      clientId = await this.handshake(peer);
+      ({ clientId, capabilities } = await this.handshake(peer));
     } catch (err) {
       await proc.kill().catch(() => undefined);
       throw err;
@@ -245,6 +274,7 @@ export class TargetConnection {
     this.peer = peer;
     this.proc = proc;
     this.#clientId = clientId;
+    this.#capabilities = new Set(capabilities);
     this.registerNotifications(peer);
     void peer.closed.then(() => this.onPeerClosed(gen));
     await this.reattachAll();
@@ -254,17 +284,19 @@ export class TargetConnection {
   /**
    * Pairing-token handshake: hello → challenge → HMAC proof (core auth.ts).
    * Returns the backend-assigned client id — the ONLY client identity on the
-   * wire (control leases name this id; nothing is self-chosen).
+   * wire (control leases name this id; nothing is self-chosen) — plus the
+   * capability bits the backend advertised in its challenge (empty for
+   * pre-negotiation backends).
    */
-  private async handshake(peer: JsonRpcPeer): Promise<string> {
-    const ref = this.hub.getTarget(this.targetId)?.pairingTokenRef;
+  private async handshake(peer: JsonRpcPeer): Promise<{ clientId: string; capabilities: string[] }> {
+    const ref = this.connector.pairingTokenRef(this.targetId);
     if (!ref) {
       throw new RemoteError(
         'REMOTE_NOT_BOOTSTRAPPED',
         `target "${this.targetId}" has no pairingTokenRef; run the pairing flow first`,
       );
     }
-    const hello = createHello();
+    const hello = createHello(undefined, this.config.capabilities);
     const challenge = await peer.call<ChallengeMessage>(Methods.Hello, hello);
     const token = await this.config
       .resolveToken(ref)
@@ -277,7 +309,9 @@ export class TargetConnection {
       proof,
     };
     const result = await peer.call<HelloProofResult>(Methods.HelloProof, params);
-    return result.clientId;
+    // Backends predating capability negotiation omit the field entirely.
+    const capabilities = Array.isArray(challenge.capabilities) ? challenge.capabilities : [];
+    return { clientId: result.clientId, capabilities };
   }
 
   /** Re-attach every subscriber from its seq cursor after a (re)connect. */
@@ -286,18 +320,20 @@ export class TargetConnection {
       for (const sub of [...subs]) {
         const base = sub.reattachRequest();
         try {
-          await this.peerCall<SessionAttachResult>(Methods.SessionAttach, base);
+          const result = await this.peerCall<SessionAttachResult>(Methods.SessionAttach, base);
+          sub.onReattached?.(result);
         } catch (err) {
           const locked = err instanceof RemoteError && err.code === 'REMOTE_SESSION_LOCKED';
           if (base.mode === 'write' && locked) {
             // Our lease outlived the disconnect and someone else took it (or
             // the backend kept it): degrade to a read attach instead of failing.
             try {
-              await this.peerCall<SessionAttachResult>(Methods.SessionAttach, {
+              const result = await this.peerCall<SessionAttachResult>(Methods.SessionAttach, {
                 ...base,
                 mode: 'read',
                 force: false,
               });
+              sub.onReattached?.(result);
               sub.handleControl(null, 'disconnected');
               continue;
             } catch (err2) {
@@ -346,8 +382,12 @@ export class TargetConnection {
     this.peer = undefined;
     this.proc = undefined;
     this.#clientId = '';
+    this.#capabilities = new Set();
     this.attempts = 0;
     this.backoffMs = this.config.reconnectInitialDelayMs;
     this.scheduleReconnect();
   }
 }
+
+/** The capability bits this client knows about and advertises by default. */
+export const CLIENT_CAPABILITIES: readonly string[] = Object.values(Capabilities);

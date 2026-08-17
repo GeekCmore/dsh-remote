@@ -21,6 +21,7 @@
     "test": "vitest run"
   },
   "dependencies": {
+    "@dsh-remote/client": "workspace:*",
     "@dsh-remote/core": "workspace:*",
     "@dsh-remote/remote": "workspace:*",
     "@dsh-remote/seams": "workspace:*",
