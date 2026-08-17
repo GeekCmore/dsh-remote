@@ -370,13 +370,26 @@ export async function spawnSshTerminal(
         // The boundary frame may sit in the pump queue when the channel
         // closes right behind it: drain the pump before classifying.
         void pump.then(() => {
-          finish(() => {
-            if (filter.isPublished) {
-              resolve();
-            } else {
-              reject(new Error('subprocess-ssh: terminal exited before publishing its output boundary'));
+          if (filter.isPublished) {
+            finish(resolve);
+            return;
+          }
+          void (async () => {
+            let detail: string | undefined;
+            try {
+              detail = (await readRemoteFile(transport, posix.join(dir, 'error'), spec.signal))?.trim();
+            } catch {
+              // Preserve the allocation failure when its diagnostic cannot be read.
             }
-          });
+            finish(() => {
+              if (filter.isPublished) {
+                resolve();
+              } else {
+                const suffix = detail ? `: ${detail}` : '';
+                reject(new Error(`subprocess-ssh: terminal exited before publishing its output boundary${suffix}`));
+              }
+            });
+          })();
         });
       };
       const onAbort = (): void => {

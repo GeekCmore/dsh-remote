@@ -644,6 +644,11 @@ export class FakeTransport implements RemoteTransport {
       };
       this.files.set(`${dir}/pid`, encoder.encode(`${proc.pgid}\n`));
       this.files.set(`${dir}/tty`, encoder.encode(`${proc.tty}\n`));
+      if (!this.dirs.has(cwd)) {
+        this.files.set(`${dir}/error`, encoder.encode(`cannot chdir: ${cwd}\n`));
+        proc.finish('exit:125', 125);
+        return;
+      }
       channel.outQueue.push(encoder.encode(marker));
 
       const program = this.terminalPrograms.get(argv[0]!) ?? this.resolveTerminalViaPath(argv[0]!, env.PATH);

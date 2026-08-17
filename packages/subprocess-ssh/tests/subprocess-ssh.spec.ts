@@ -511,6 +511,13 @@ describe('spawnTerminal', () => {
     await expect(term.done).resolves.toEqual({ exitCode: 127, signal: null });
   });
 
+  it('reports a missing terminal cwd before the output boundary', async () => {
+    const { runtime } = setup();
+    await expect(runtime.spawnTerminal(termSpec({ cwd: '/no/such/dir' }))).rejects.toThrow(
+      'terminal exited before publishing its output boundary: cannot chdir: /no/such/dir',
+    );
+  });
+
   it('negotiates the spec window size and TERM via the pty request', async () => {
     const { fake, runtime } = setup();
     addShell(fake);
