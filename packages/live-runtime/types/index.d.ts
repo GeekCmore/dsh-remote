@@ -5,6 +5,11 @@ export type LiveConnectionStatus = 'connected' | 'connecting' | 'disconnected' |
 export type LiveAuth =
   | { type: 'agent' }
   | { type: 'key'; privateKeyPath: string; passphrase?: string }
+  | { type: 'password' }
+
+export interface LiveCredentials {
+  password?: string
+}
 
 export interface LiveRuntimeConfig {
   targetId?: string
@@ -74,9 +79,9 @@ export interface LiveRuntime {
   readonly status: LiveConnectionStatus
   readonly runtimeRoot: string | undefined
   readonly metrics: LiveMetrics | undefined
-  connect(): Promise<void>
+  connect(credentials?: LiveCredentials): Promise<void>
   disconnect(): Promise<void>
-  reconnect(): Promise<void>
+  reconnect(credentials?: LiveCredentials): Promise<void>
   exec(request: LiveExecRequest): Promise<LiveExecResult>
   runCommand(request: LiveCommandRequest): Promise<LiveCommandResult>
   subscribe(listener: () => void): () => void

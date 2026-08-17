@@ -84,6 +84,17 @@ describe('SshRemoteHub', () => {
       expect(connected).toHaveBeenCalledWith('a');
     });
 
+    it('uses a one-shot auth override without changing the target registration', async () => {
+      hub.addTarget({
+        id: 'a',
+        ssh: { ...ssh, auth: { type: 'password', password: '' } },
+      });
+      await hub.connect('a', { type: 'password', password: 'temporary' });
+      expect(FakeClient.latest().connectOptionsAtCall?.password).toBe('temporary');
+      expect(FakeClient.latest().connectOptions?.password).toBeUndefined();
+      expect(hub.getTarget('a')?.ssh.auth).toEqual({ type: 'password', password: '' });
+    });
+
     it('reuses the live transport for repeated connects', async () => {
       hub.addTarget({ id: 'a', ssh });
       const first = await hub.connect('a');

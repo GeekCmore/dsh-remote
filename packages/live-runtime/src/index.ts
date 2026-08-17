@@ -8,6 +8,7 @@ import type {
   LiveAuth,
   LiveCommandRequest,
   LiveCommandResult,
+  LiveCredentials,
   LiveExecRequest,
   LiveExecResult,
   LiveMetrics,
@@ -20,6 +21,7 @@ export type {
   LiveCommandRequest,
   LiveCommandResult,
   LiveConnectionStatus,
+  LiveCredentials,
   LiveExecRequest,
   LiveExecResult,
   LiveHubHandle,
@@ -66,8 +68,18 @@ async function execTransport(
   }
 }
 
+function requiredPassword(credentials: LiveCredentials | undefined): string {
+  if (credentials?.password === undefined || credentials.password.length === 0) {
+    throw new Error('SSH password is required')
+  }
+  return credentials.password
+}
+
 export function installLiveRuntime(ctx: Context, config: LiveRuntimeConfig): LiveRuntime {
   const targetId = config.targetId ?? 'default'
+  const registeredAuth = config.auth.type === 'password'
+    ? { type: 'password' as const, password: '' }
+    : config.auth
   const hub = new SshRemoteHub(ctx, {
     targets: [{
       id: targetId,
@@ -76,7 +88,7 @@ export function installLiveRuntime(ctx: Context, config: LiveRuntimeConfig): Liv
         host: config.host,
         port: config.port ?? 22,
         username: config.username,
-        auth: config.auth,
+        auth: registeredAuth,
         readyTimeoutMs: config.readyTimeoutMs ?? 15_000,
         keepaliveIntervalMs: config.keepaliveIntervalMs ?? 0,
       },
@@ -122,8 +134,11 @@ export function installLiveRuntime(ctx: Context, config: LiveRuntimeConfig): Liv
     get metrics() {
       return monitor.snapshot(targetId) as LiveMetrics | undefined
     },
-    async connect() {
-      await hub.connect(targetId)
+    async connect(credentials?: LiveCredentials) {
+      const auth = config.auth.type === 'password'
+        ? { type: 'password' as const, password: requiredPassword(credentials) }
+        : undefined
+      await hub.connect(targetId, auth)
       monitor.start(targetId, { intervalMs: config.monitorIntervalMs ?? 5_000 })
       notify()
     },
@@ -132,10 +147,13 @@ export function installLiveRuntime(ctx: Context, config: LiveRuntimeConfig): Liv
       await hub.disconnect(targetId)
       notify()
     },
-    async reconnect() {
+    async reconnect(credentials?: LiveCredentials) {
+      const auth = config.auth.type === 'password'
+        ? { type: 'password' as const, password: requiredPassword(credentials) }
+        : undefined
       monitor.stop(targetId)
       await hub.disconnect(targetId)
-      await hub.connect(targetId)
+      await hub.connect(targetId, auth)
       monitor.start(targetId, { intervalMs: config.monitorIntervalMs ?? 5_000 })
       notify()
     },

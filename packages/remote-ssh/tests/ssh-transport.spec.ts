@@ -39,14 +39,16 @@ describe('SshTransport.connect', () => {
       readyTimeoutMs: 5000,
       keepaliveIntervalMs: 1000,
     });
-    expect(FakeClient.latest().connectOptions).toMatchObject({
+    expect(FakeClient.latest().connectOptionsAtCall).toMatchObject({
       host: 'host.test',
       port: 2222,
       username: 'u',
       password: 'pw',
+      tryKeyboard: true,
       readyTimeout: 5000,
       keepaliveInterval: 1000,
     });
+    expect(FakeClient.latest().connectOptions?.password).toBeUndefined();
   });
 
   it('defaults the port to 22 and uses the agent socket for agent auth', async () => {
@@ -59,6 +61,26 @@ describe('SshTransport.connect', () => {
       else process.env.SSH_AUTH_SOCK = old;
     }
     expect(FakeClient.latest().connectOptions).toMatchObject({ port: 22, agent: '/tmp/agent.sock' });
+  });
+
+  it('answers keyboard-interactive prompts with the temporary password', async () => {
+    FakeClient.deferReady = true;
+    const pending = connect({ host: 'h', username: 'u', auth: { type: 'password', password: 'pw' } });
+    const client = FakeClient.latest();
+    await vi.waitFor(() => expect(client.listenerCount('keyboard-interactive')).toBe(1));
+    let answers: string[] | undefined;
+    client.emit(
+      'keyboard-interactive',
+      'login',
+      '',
+      '',
+      [{ prompt: 'Password: ', echo: false }],
+      (value: string[]) => { answers = value; },
+    );
+    expect(answers).toEqual(['pw']);
+    client.ready();
+    await pending;
+    expect(client.listenerCount('keyboard-interactive')).toBe(0);
   });
 
   it('reads the private key file for key auth', async () => {

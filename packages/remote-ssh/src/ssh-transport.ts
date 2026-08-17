@@ -15,6 +15,8 @@ import type {
   ClientChannel,
   ConnectConfig,
   FileEntryWithStats,
+  KeyboardInteractiveCallback,
+  Prompt,
   SFTPWrapper,
   Stats,
 } from 'ssh2';
@@ -221,6 +223,22 @@ export class SshTransport implements RemoteTransport {
     const client = new Client();
     const transport = new SshTransport(client);
     const options = await SshTransport.buildConnectConfig(config, hooks);
+    let keyboardPassword = config.auth.type === 'password' ? config.auth.password : undefined;
+    const onKeyboardInteractive = (
+      _name: string,
+      _instructions: string,
+      _lang: string,
+      prompts: Prompt[],
+      finish: KeyboardInteractiveCallback,
+    ) => {
+      const password = keyboardPassword;
+      finish(password === undefined ? [] : prompts.map(() => password));
+    };
+    const removeKeyboardInteractiveListener = () => {
+      const off = client.off as unknown as (event: string, listener: typeof onKeyboardInteractive) => Client;
+      off.call(client, 'keyboard-interactive', onKeyboardInteractive);
+    };
+    if (keyboardPassword !== undefined) client.on('keyboard-interactive', onKeyboardInteractive);
     await new Promise<void>((resolve, reject) => {
       const onReady = () => {
         cleanup();
@@ -233,6 +251,9 @@ export class SshTransport implements RemoteTransport {
       const cleanup = () => {
         client.off('ready', onReady);
         client.off('error', onError);
+        removeKeyboardInteractiveListener();
+        keyboardPassword = undefined;
+        if (config.auth.type === 'password') options.password = undefined;
       };
       client.once('ready', onReady);
       client.once('error', onError);
@@ -266,6 +287,7 @@ export class SshTransport implements RemoteTransport {
         break;
       case 'password':
         options.password = config.auth.password;
+        options.tryKeyboard = true;
         break;
     }
     if (hooks?.hostVerifier) {

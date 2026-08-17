@@ -219,11 +219,13 @@ export class FakeClient extends EventEmitter {
   static nextConnectError: Error | undefined;
   /** Fallback exec behavior when the instance has no `execHandler`. */
   static defaultExec: ((command: string, opts: Record<string, unknown>) => ExecSpec) | undefined;
+  static deferReady = false;
 
   static reset(): void {
     FakeClient.instances = [];
     FakeClient.nextConnectError = undefined;
     FakeClient.defaultExec = undefined;
+    FakeClient.deferReady = false;
   }
 
   /** Latest created instance (the one the transport under test uses). */
@@ -234,6 +236,7 @@ export class FakeClient extends EventEmitter {
   }
 
   connectOptions: Record<string, unknown> | undefined;
+  connectOptionsAtCall: Record<string, unknown> | undefined;
   ended = false;
   execHandler: ((command: string, opts: Record<string, unknown>) => ExecSpec) | undefined;
   sftpError: Error | undefined;
@@ -248,13 +251,18 @@ export class FakeClient extends EventEmitter {
 
   connect(options: Record<string, unknown>): this {
     this.connectOptions = options;
+    this.connectOptionsAtCall = { ...options };
     const error = FakeClient.nextConnectError;
     FakeClient.nextConnectError = undefined;
     process.nextTick(() => {
       if (error) this.emit('error', error);
-      else this.emit('ready');
+      else if (!FakeClient.deferReady) this.emit('ready');
     });
     return this;
+  }
+
+  ready(): void {
+    this.emit('ready');
   }
 
   exec(command: string, opts: unknown, cb?: unknown): this {
