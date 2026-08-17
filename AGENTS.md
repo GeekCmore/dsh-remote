@@ -60,8 +60,9 @@ pnpm smoke:dsh-daemon      # e2e/dsh-daemon/run-smoke.sh; needs docker + npm reg
   LLM-gated leg: with `DSH_SMOKE_LLM_KEY` (falling back to `DEEPSEEK_API_KEY`)
   the deploy injects the key into the container's `$DSH_HOME/.credentials.yaml`
   (the model call runs on the remote host) and the smoke additionally runs a
-  real prompt round trip plus the remote→local approval bridge (`llm=ok` on
-  the OK line; SKIP line and green without a key). Wire `session.create` mints
+  real `ask_user_question` and sandbox-approval prompt round trips through the
+  remote→local bridges (`llm=ok question=ok approval=ok` on the OK line; SKIP
+  line and green without a key). Wire `session.create` mints
   the remote session AND its live agent together (broker routes it to
   `ctx.agents.create`, the upstream creation contract), so wire-created
   sessions are promptable.

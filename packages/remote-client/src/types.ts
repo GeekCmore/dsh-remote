@@ -27,6 +27,7 @@ export type {
   PendingInteraction,
   PromptContentBlock,
   QuestionItem,
+  QuestionIntent,
   QuestionOption,
   QuestionRequestParams,
   SkillSummary,

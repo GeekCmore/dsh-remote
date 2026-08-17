@@ -5,6 +5,7 @@ import {
   Methods,
   Notifications,
   PROTOCOL_VERSION,
+  type QuestionItem,
 } from '../src/index.js';
 
 describe('protocol vocabulary', () => {
@@ -50,5 +51,24 @@ describe('protocol vocabulary', () => {
 
   it('pins the appended error code', () => {
     expect(isRemoteErrorCode('REMOTE_CAPABILITY_UNSUPPORTED')).toBe(true);
+  });
+
+  it('pins the additive question presentation fields and intent literal', () => {
+    const item: QuestionItem = {
+      id: 'plan',
+      question: 'Approve this plan?',
+      detail: '# Plan',
+      header: 'Review',
+      intent: { kind: 'plan-review', approve: 'Approve' },
+      options: [{ id: 'approve', label: 'Approve' }],
+    };
+    expect(item).toEqual({
+      id: 'plan',
+      question: 'Approve this plan?',
+      detail: '# Plan',
+      header: 'Review',
+      intent: { kind: 'plan-review', approve: 'Approve' },
+      options: [{ id: 'approve', label: 'Approve' }],
+    });
   });
 });

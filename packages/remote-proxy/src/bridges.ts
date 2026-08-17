@@ -170,11 +170,18 @@ export class InteractionBridges {
     const questions: AskUserQuestionItem[] = req.items.map((item) => ({
       id: item.id,
       question: item.question,
+      ...(item.detail !== undefined ? { detail: item.detail } : {}),
+      ...(item.header !== undefined ? { header: item.header } : {}),
       ...(item.multiSelect !== undefined ? { multiSelect: item.multiSelect } : {}),
-      options: item.options.map((option) => ({
-        label: option.label,
-        ...(option.description !== undefined ? { description: option.description } : {}),
-      })),
+      ...(item.intent !== undefined ? { intent: item.intent } : {}),
+      ...(item.options.length > 0
+        ? {
+            options: item.options.map((option) => ({
+              label: option.label,
+              ...(option.description !== undefined ? { description: option.description } : {}),
+            })),
+          }
+        : {}),
     }));
     let answer: AskUserQuestionAnswer;
     try {

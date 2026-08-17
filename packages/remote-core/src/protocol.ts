@@ -394,6 +394,14 @@ export interface QuestionOption {
   description?: string;
 }
 
+/** Presentation intent understood by capable question frontends. */
+export type QuestionIntent = {
+  /** A plan submitted for explicit approval or rejection. */
+  kind: 'plan-review';
+  /** Label of the option that approves the plan. */
+  approve: string;
+};
+
 /**
  * One question of an ask-user-question request, modeled on dsh's
  * ask_user_question tool shape (question/items/options/answers).
@@ -403,8 +411,14 @@ export interface QuestionItem {
   id: string;
   /** The question text shown to the user. */
   question: string;
+  /** Supporting detail rendered separately from the question text. */
+  detail?: string;
+  /** Short heading/group label. */
+  header?: string;
   /** True when the user may select several options (answer value is an array). */
   multiSelect?: boolean;
+  /** Optional presentation intent; it never changes the answer encoding. */
+  intent?: QuestionIntent;
   options: QuestionOption[];
 }
 

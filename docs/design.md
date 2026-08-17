@@ -39,7 +39,7 @@ defeating live mode's zero-deployment goal.)
 | `remote-sessions` | frontend | Daemon-mode session vocabulary + handle façade | declares `remoteSessions` |
 | `remote-daemon` | frontend | `remoteSessions` over the daemon protocol | provides `remoteSessions` |
 | `remote-frontend` | frontend | Transfer/preview, monitor, `remote_copy` tool | provides `remoteTransfer`, `remoteMonitor` |
-| `remote-backend` | backend | Daemon-side plugin: broker, approval bridge, lease, monitor, transfer | runs in the remote headless dsh |
+| `remote-backend` | backend | Daemon-side plugin: broker, approval/question bridges, lease, monitor, transfer | runs in the remote headless dsh |
 | `bundle-live` / `bundle-daemon` | profile | dsh profile bundles (`dsh.bundle` patch) | composition only |
 
 `ctx.remoteHub` mirrors the `ctx.e2b` pattern: one service owns the

@@ -132,6 +132,46 @@ describe('QuestionBridge routing', () => {
     await expect(asked).rejects.toThrowError(/frontend disconnected before answering/);
     expect(bridge.pendingCount).toBe(0);
   });
+
+  it('does not surface an already-aborted request', async () => {
+    const { sessions, broker, host, bridge } = makeBridge();
+    sessions.add('s1');
+    const a = fakeConnection('a');
+    broker.connect(a.conn);
+    broker.attach('a', { sessionId: 's1', mode: 'write' });
+    const controller = new AbortController();
+    controller.abort();
+
+    await expect(
+      host.ask({ sessionId: 's1', signal: controller.signal, items: ITEMS }),
+    ).rejects.toThrowError(/aborted before frontend answered/);
+    expect(bridge.pendingCount).toBe(0);
+    expect(a.notifications.filter((n) => n.method === Methods.QuestionRequest)).toHaveLength(0);
+  });
+
+  it('withdraws a surfaced request when the host signal aborts', async () => {
+    const { sessions, broker, host, bridge } = makeBridge();
+    sessions.add('s1');
+    const a = fakeConnection('a');
+    broker.connect(a.conn);
+    broker.attach('a', { sessionId: 's1', mode: 'write' });
+    const controller = new AbortController();
+
+    const asked = host.ask({ sessionId: 's1', signal: controller.signal, items: ITEMS });
+    await tick();
+    const request = a.notifications.find((n) => n.method === Methods.QuestionRequest)!
+      .params as QuestionRequestParams;
+    controller.abort();
+
+    await expect(asked).rejects.toThrowError(/aborted before frontend answered/);
+    expect(bridge.pendingCount).toBe(0);
+    expect(a.notifications).toContainEqual({
+      method: Notifications.QuestionClosed,
+      params: { questionId: request.questionId },
+    });
+    expect(() => bridge.answer('a', { questionId: request.questionId, answers: { q1: 'a' } }))
+      .toThrowError(/already-settled/);
+  });
 });
 
 describe('questions over the wire', () => {

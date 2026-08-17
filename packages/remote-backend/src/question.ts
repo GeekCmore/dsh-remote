@@ -43,6 +43,7 @@ interface PendingQuestion {
   readonly params: QuestionRequestParams;
   readonly resolve: (answers: HostQuestionAnswers) => void;
   readonly reject: (err: Error) => void;
+  abort?: { signal: AbortSignal; listener: () => void };
 }
 
 export class QuestionBridge {
@@ -60,6 +61,9 @@ export class QuestionBridge {
   /** Detach from the host provider registry (plugin unload). */
   dispose(): void {
     this.#unsubscribeHost();
+    for (const pending of [...this.#pending.values()]) {
+      this.#withdraw(pending, new Error('question provider disposed before answering'));
+    }
   }
 
   /** `question.answer` from a frontend. */
@@ -105,6 +109,9 @@ export class QuestionBridge {
   }
 
   async #ask(request: HostQuestionRequest): Promise<HostQuestionAnswers> {
+    if (request.signal?.aborted) {
+      throw new Error('ask_user_question aborted before frontend answered');
+    }
     const sessionId = request.sessionId;
     const targets: BrokerConnection[] =
       sessionId !== undefined && this.#broker.writerOf(sessionId)
@@ -123,18 +130,41 @@ export class QuestionBridge {
       questionId,
       sessionId: sessionId ?? '',
       ...(request.summary !== undefined ? { summary: request.summary } : {}),
-      items: request.items,
+      items: request.items.map((item) => ({
+        id: item.id,
+        question: item.question,
+        ...(item.detail !== undefined ? { detail: item.detail } : {}),
+        ...(item.header !== undefined ? { header: item.header } : {}),
+        ...(item.multiSelect !== undefined ? { multiSelect: item.multiSelect } : {}),
+        ...(item.intent !== undefined ? { intent: item.intent } : {}),
+        options: item.options,
+      })),
     };
+    let resolveAnswer!: (answers: HostQuestionAnswers) => void;
+    let rejectAnswer!: (err: Error) => void;
     const answerPromise = new Promise<HostQuestionAnswers>((resolve, reject) => {
-      this.#pending.set(questionId, {
-        questionId,
-        ...(sessionId !== undefined ? { sessionId } : {}),
-        targets: new Set(targets.map((conn) => conn.clientId)),
-        params,
-        resolve,
-        reject,
-      });
+      resolveAnswer = resolve;
+      rejectAnswer = reject;
     });
+    const pending: PendingQuestion = {
+      questionId,
+      ...(sessionId !== undefined ? { sessionId } : {}),
+      targets: new Set(targets.map((conn) => conn.clientId)),
+      params,
+      resolve: resolveAnswer,
+      reject: rejectAnswer,
+    };
+    this.#pending.set(questionId, pending);
+    if (request.signal !== undefined) {
+      const listener = () => {
+        this.#withdraw(pending, new Error('ask_user_question aborted before frontend answered'));
+      };
+      pending.abort = { signal: request.signal, listener };
+      request.signal.addEventListener('abort', listener, { once: true });
+      // Cover an abort racing the initial `aborted` check and listener setup.
+      if (request.signal.aborted) listener();
+    }
+    if (!this.#pending.has(questionId)) return answerPromise;
     for (const conn of targets) {
       try {
         conn.notify(Methods.QuestionRequest, params);
@@ -147,6 +177,7 @@ export class QuestionBridge {
 
   #settle(pending: PendingQuestion, answers: HostQuestionAnswers, winner?: string): void {
     if (!this.#pending.delete(pending.questionId)) return;
+    this.#cleanupAbort(pending);
     const closed: QuestionClosedNotification = {
       questionId: pending.questionId,
       answers,
@@ -158,9 +189,16 @@ export class QuestionBridge {
 
   #withdraw(pending: PendingQuestion, err: Error): void {
     if (!this.#pending.delete(pending.questionId)) return;
+    this.#cleanupAbort(pending);
     const closed: QuestionClosedNotification = { questionId: pending.questionId };
     this.#notifyLosers(pending, closed, undefined);
     pending.reject(err);
+  }
+
+  #cleanupAbort(pending: PendingQuestion): void {
+    if (!pending.abort) return;
+    pending.abort.signal.removeEventListener('abort', pending.abort.listener);
+    pending.abort = undefined;
   }
 
   #notifyLosers(

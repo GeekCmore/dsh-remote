@@ -17,8 +17,9 @@
 #      to DEEPSEEK_API_KEY), inject it into the container's managed credential
 #      store ($DSH_HOME/.credentials.yaml) — daemon mode runs the model call
 #      on the REMOTE host, so the key must live there; the smoke plugin then
-#      exercises a real prompt + approval-bridge round trip and the OK line
-#      gains `llm=ok`. With no key the LLM leg prints one SKIP line. The key
+#      exercises real question-bridge and approval-bridge prompt round trips;
+#      the OK line gains `llm=ok question=ok approval=ok`. With no key the LLM
+#      leg prints one SKIP line. The key
 #      travels over ssh stdin only: never argv, never a log line, never
 #      smoke.out,
 #   6. create a scratch DSH_HOME with a `smoke-daemon` profile layered on
@@ -134,6 +135,7 @@ cat > package.json <<'JSON'
   "dependencies": {
     "@deepseek-ai/dsh-base": "0.1.0-rc.6",
     "@deepseek-ai/dsh-app-boot": "0.1.0-rc.6",
+    "@deepseek-ai/dsh-tool-ask-user": "0.1.0-rc.6",
     "@dsh-remote/backend": "file:/home/dsh/vendor/dsh-remote-backend-0.0.0.tgz",
     "@dsh-remote/core": "file:/home/dsh/vendor/dsh-remote-core-0.0.0.tgz",
     "@dsh-remote/seams": "file:/home/dsh/vendor/dsh-remote-seams-0.0.0.tgz"
@@ -156,6 +158,11 @@ cat > cordis.patch.yml <<'YAML'
     - id: dsh-remote-backend
       name: '@dsh-remote/backend'
       inject: [sessions, agents]
+    # dsh-base provides ctx.userQuestions but intentionally does not mount
+    # the model-facing ask_user_question tool; the smoke needs the real tool
+    # on the remote agent to exercise the backend question adapter.
+    - id: tool-ask-user
+      name: '@deepseek-ai/dsh-tool-ask-user'
 YAML
 npm install --no-fund --no-audit --fetch-retries=5 >&2
 # Token is stdout line 2 of init (line 1 is the header, line 3 the path note).

@@ -22,16 +22,14 @@
  *   5. OPTIONAL LLM leg (gated on DSH_SMOKE_LLM_KEY, falling back to
  *      DEEPSEEK_API_KEY; run-smoke.sh injects the same key into the
  *      CONTAINER's credential store, because in daemon mode the model call
- *      happens on the remote host): registers a local auto-approving
- *      `approval/request` answerer, prompts the remote agent for a bash
- *      command the workspace-write sandbox must deny (a /var/tmp write —
- *      /tmp itself is inside the workspace-write allow-list) so the
- *      retry escalates through the approval bridge, and asserts the bridged
- *      approval landed locally and the final assistant message echoes the
- *      marker — proving the full prompt → approval → answer → completion
- *      round trip. Without a key it prints one SKIP line and continues.
- *   6. prints one DSH_REMOTE_DAEMON_SMOKE OK line on stderr (with `llm=ok`
- *      when the LLM leg ran) and exits 0.
+ *      happens on the remote host): first registers a local userQuestions
+ *      provider and proves a real remote ask_user_question → local answer →
+ *      remote completion round trip; then registers a local auto-approving
+ *      `approval/request` answerer and proves the existing sandbox-escalation
+ *      approval round trip. Without a key it prints one SKIP line and
+ *      continues.
+ *   6. prints one DSH_REMOTE_DAEMON_SMOKE OK line on stderr (with
+ *      `llm=ok question=ok approval=ok` when the LLM leg ran) and exits 0.
  *
  * Any failure prints DSH_REMOTE_DAEMON_SMOKE FAIL plus the stack and exits 1.
  * The SSH target and pairing token come from smoke.patch.yml
@@ -49,6 +47,15 @@ function fail(error) {
   process.exit(1);
 }
 
+function messageText(data) {
+  const blocks = data?.message?.content;
+  if (!Array.isArray(blocks)) return '';
+  return blocks
+    .flatMap((block) => (Array.isArray(block?.content) ? block.content : [block]))
+    .map((block) => (typeof block?.text === 'string' ? block.text : ''))
+    .join('');
+}
+
 /**
  * Compact digest of a remote history page for the LLM-leg timeout error:
  * event-type histogram, every tool call/result by name, and a snippet of the
@@ -63,12 +70,7 @@ function summarizeRemote(entries) {
     // assistant/chunk: {text}; assistant/message + tool/result:
     // {message: {content: blocks}} (tool/result nests one tool-result block).
     if (typeof data?.text === 'string') return data.text;
-    const blocks = data?.message?.content;
-    if (!Array.isArray(blocks)) return '';
-    return blocks
-      .flatMap((b) => (Array.isArray(b?.content) ? b.content : [b]))
-      .map((b) => (typeof b?.text === 'string' ? b.text : ''))
-      .join('');
+    return messageText(data);
   };
   for (const { seq, event } of entries) {
     counts.set(event.type, (counts.get(event.type) ?? 0) + 1);
@@ -181,13 +183,21 @@ export default function dshRemoteDaemonSmoke(ctx) {
       throw new Error(`remote (cold) list does not contain the forked session ${forked.sessionId}`);
     }
 
-    // --- 5. optional LLM round trip + approval bridge -------------------------
+    // --- 5. optional LLM round trips + question/approval bridges ---------------
     // Gated on a model key (DSH_SMOKE_LLM_KEY wins, DEEPSEEK_API_KEY is the
     // fallback); the key itself is only a presence signal here — the remote
     // host got it through its own credential store (see run-smoke.sh).
     let llmLeg = '';
     if (process.env.DSH_SMOKE_LLM_KEY ?? process.env.DEEPSEEK_API_KEY) {
+      const QUESTION_MARKER = 'dsh-remote-question-ok';
       const MARKER_TEXT = 'dsh-remote-llm-ok';
+      const questions = [];
+      const disposeQuestionProvider = ctx.userQuestions.registerProvider({
+        ask: async (req) => {
+          questions.push(req);
+          return { answers: [{ id: 'smoke-choice', selected: ['Continue'] }] };
+        },
+      });
       // The local answerer the proxy's bridge is meant to reach: a remote
       // approval/request is dispatched onto the LOCAL approval waterfall; an
       // 'allowed-once' here maps to a wire 'approve' that unblocks the
@@ -197,6 +207,61 @@ export default function dshRemoteDaemonSmoke(ctx) {
         approvals.push({ toolName: req.toolName, reason: req.reason });
         return 'allowed-once';
       });
+
+      // attach() is idempotent per (target, session) and returns the mirror's
+      // own write handle — the exact handle followup() would route to. The
+      // awaited prompt() surfaces immediate remote rejection.
+      const writer = await ctx.remoteSessions.attach(TARGET_ID, sessionId, { mode: 'write' });
+      // Wire-level tap, independent of the mirror: distinguishes "the daemon
+      // never delivered seq N to this handle" from "the mirror received seq N
+      // but failed to append it" when the two diverge on timeout.
+      const wireSeqs = [];
+      const offWire = writer.onEvent((ev) => wireSeqs.push(ev.seq));
+
+      // First prove the question bridge against the real upstream
+      // AskUserQuestionRequest shape on both hosts.
+      const QUESTION_PROMPT =
+        'Immediately call the ask_user_question tool with exactly one question and no preamble. ' +
+        'Use id "smoke-choice", header "Remote question", question ' +
+        '"Choose Continue to finish the question smoke.", and two options: ' +
+        'label "Continue" with description "Complete the smoke", and label "Stop" ' +
+        'with description "Do not complete it". Your first action must be that tool call. ' +
+        `After the answer returns, reply with exactly ${QUESTION_MARKER} and nothing else.`;
+      await writer.prompt(QUESTION_PROMPT);
+
+      const questionDeadline = Date.now() + 180_000;
+      let questionEchoed = false;
+      for (;;) {
+        questionEchoed = created.agent.session.events.some(
+          (ev) =>
+            ev.type === 'assistant/message' &&
+            messageText(ev.data).trim() === QUESTION_MARKER,
+        );
+        if (questionEchoed && questions.length > 0) break;
+        if (Date.now() > questionDeadline) {
+          const remotePage = await writer.history({ maxMessages: 400 });
+          throw new Error(
+            `question round trip timed out after 180s: echoed=${questionEchoed}`
+              + ` questions=${JSON.stringify(questions.map((request) => request.questions))}`
+              + ` localSeq=${created.agent.session.seq} wireSeqs=${wireSeqs.length}`
+              + ` remote=${summarizeRemote(remotePage.entries)}`,
+          );
+        }
+        await new Promise((resolve) => setTimeout(resolve, 1_000));
+      }
+      const receivedQuestion = questions[0];
+      const receivedItem = receivedQuestion?.questions?.[0];
+      if (receivedQuestion?.agent !== created.agent) {
+        throw new Error('bridged question did not carry the exact mirrored root agent');
+      }
+      if (
+        receivedItem?.id !== 'smoke-choice' ||
+        receivedItem?.header !== 'Remote question' ||
+        receivedItem?.question !== 'Choose Continue to finish the question smoke.' ||
+        receivedItem?.options?.[0]?.label !== 'Continue'
+      ) {
+        throw new Error(`bridged question shape mismatch: ${JSON.stringify(receivedItem)}`);
+      }
 
       // A plain in-workspace command never asks approval in the default
       // workspace-write mode, so the command MUST cross the sandbox fence.
@@ -208,13 +273,6 @@ export default function dshRemoteDaemonSmoke(ctx) {
       // sandbox_permissions + justification, and that retry is the approval
       // the bridge relays.
       //
-      // Prompt through the client handle directly instead of
-      // created.agent.followup(): attach() is idempotent per (target,
-      // session) and returns the mirror's own write handle — the exact
-      // handle followup() would route to — and the AWAITED prompt()
-      // surfaces remote rejection (followup is fire-and-forget and would
-      // swallow it into the plugin logger).
-      //
       // The prompt is deliberately imperative: reasoning models happily
       // narrate a plan for minutes without ever emitting the tool call, so
       // order an IMMEDIATE call, by tool name, with no explanation.
@@ -225,12 +283,6 @@ export default function dshRemoteDaemonSmoke(ctx) {
         'If the sandbox denies the write, retry the exact same command once ' +
         'with sandbox_permissions plus a one-sentence justification. Once the ' +
         `command has run, reply with exactly its stdout and nothing else.`;
-      const writer = await ctx.remoteSessions.attach(TARGET_ID, sessionId, { mode: 'write' });
-      // Wire-level tap, independent of the mirror: distinguishes "the daemon
-      // never delivered seq N to this handle" from "the mirror received seq N
-      // but failed to append it" when the two diverge on timeout.
-      const wireSeqs = [];
-      const offWire = writer.onEvent((ev) => wireSeqs.push(ev.seq));
       await writer.prompt(PROMPT_TEXT);
 
       const llmDeadline = Date.now() + 300_000;
@@ -282,7 +334,9 @@ export default function dshRemoteDaemonSmoke(ctx) {
       if (approvals[0].toolName !== 'bash') {
         throw new Error(`bridged approval was for ${String(approvals[0].toolName)}, expected bash`);
       }
-      llmLeg = ' llm=ok';
+      offWire();
+      disposeQuestionProvider();
+      llmLeg = ' llm=ok question=ok approval=ok';
     } else {
       console.error('DSH_REMOTE_DAEMON_SMOKE SKIP llm (no DSH_SMOKE_LLM_KEY / DEEPSEEK_API_KEY)');
     }
@@ -298,5 +352,12 @@ export default function dshRemoteDaemonSmoke(ctx) {
   })().catch(fail);
 }
 
-// Activate only once all five services are mounted by the composition tree.
-dshRemoteDaemonSmoke.inject = ['sessions', 'agents', 'sessionPersistence', 'remoteHub', 'remoteSessions'];
+// Activate only once all services used by the seam and interaction checks are mounted.
+dshRemoteDaemonSmoke.inject = [
+  'sessions',
+  'agents',
+  'sessionPersistence',
+  'remoteHub',
+  'remoteSessions',
+  'userQuestions',
+];

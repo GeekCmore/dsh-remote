@@ -218,6 +218,116 @@ describe('hostAccessFromContext approval waterfall adaptation', () => {
   });
 });
 
+describe('hostAccessFromContext user-question adaptation', () => {
+  interface UpstreamRequest {
+    questions: Array<{
+      id: string;
+      question: string;
+      detail?: string;
+      header?: string;
+      options?: Array<{ label: string; description?: string }>;
+      multiSelect?: boolean;
+      intent?: { kind: 'plan-review'; approve: string };
+    }>;
+    agent?: { session?: { id: string } };
+    signal?: AbortSignal;
+  }
+  interface UpstreamAnswer {
+    answers: Array<{ id: string; selected: string[]; custom?: string }>;
+  }
+
+  function upstreamProvider(
+    askHost: (request: unknown) => Promise<Record<string, string | string[]>>,
+  ): (request: UpstreamRequest) => Promise<UpstreamAnswer> {
+    let provider:
+      | { ask(request: UpstreamRequest): Promise<UpstreamAnswer> }
+      | undefined;
+    const service = {
+      registerProvider(next: { ask(request: UpstreamRequest): Promise<UpstreamAnswer> }) {
+        provider = next;
+        return () => {
+          provider = undefined;
+        };
+      },
+    };
+    const { ctx } = fakeContext({ services: { userQuestions: service } });
+    hostAccessFromContext(ctx).questionHost!.registerProvider({ ask: askHost as never });
+    expect(provider).toBeDefined();
+    return (request) => provider!.ask(request);
+  }
+
+  it('maps the upstream request and restores selected labels plus custom text', async () => {
+    let hostRequest: any;
+    const ask = upstreamProvider(async (request) => {
+      hostRequest = request;
+      return {
+        choice: ['option-1', 'typed answer'],
+        free: 'free-form value',
+      };
+    });
+    const controller = new AbortController();
+    const result = await ask({
+      agent: { session: { id: 'session-1' } },
+      signal: controller.signal,
+      questions: [
+        {
+          id: 'choice',
+          question: 'Choose',
+          detail: 'Longer context',
+          header: 'Decision',
+          multiSelect: true,
+          intent: { kind: 'plan-review', approve: 'Same' },
+          options: [
+            { label: 'Same', description: 'first duplicate' },
+            { label: 'Same', description: 'second duplicate' },
+          ],
+        },
+        { id: 'free', question: 'Explain' },
+      ],
+    });
+
+    expect(hostRequest).toEqual({
+      sessionId: 'session-1',
+      signal: controller.signal,
+      items: [
+        {
+          id: 'choice',
+          question: 'Choose',
+          detail: 'Longer context',
+          header: 'Decision',
+          multiSelect: true,
+          intent: { kind: 'plan-review', approve: 'Same' },
+          options: [
+            { id: 'option-0', label: 'Same', description: 'first duplicate' },
+            { id: 'option-1', label: 'Same', description: 'second duplicate' },
+          ],
+        },
+        { id: 'free', question: 'Explain', options: [] },
+      ],
+    });
+    expect(result).toEqual({
+      answers: [
+        { id: 'choice', selected: ['Same'], custom: 'typed answer' },
+        { id: 'free', selected: [], custom: 'free-form value' },
+      ],
+    });
+  });
+
+  it('rejects wire answers that cannot fit the upstream answer shape', async () => {
+    const multiCustom = upstreamProvider(async () => ({ q: ['one', 'two'] }));
+    await expect(
+      multiCustom({ questions: [{ id: 'q', question: '?', multiSelect: true }] }),
+    ).rejects.toThrowError(/more than one custom answer/);
+
+    const arrayForSingle = upstreamProvider(async () => ({ q: ['option-0'] }));
+    await expect(
+      arrayForSingle({
+        questions: [{ id: 'q', question: '?', options: [{ label: 'Yes' }] }],
+      }),
+    ).rejects.toThrowError(/multiple answers for single-select/);
+  });
+});
+
 describe('hostAccessFromContext listCold wiring', () => {
   it('forwards the async persistence list (SessionHeader-shaped) to sessions.listCold', async () => {
     const persistence = {

@@ -127,6 +127,9 @@ describe('question bridge', () => {
         {
           id: 'q1',
           question: 'Proceed?',
+          detail: 'Review the impact',
+          header: 'Confirm',
+          intent: { kind: 'plan-review', approve: 'Yes' },
           options: [
             { id: 'y', label: 'Yes' },
             { id: 'n', label: 'No', description: 'decline' },
@@ -141,6 +144,9 @@ describe('question bridge', () => {
       {
         id: 'q1',
         question: 'Proceed?',
+        detail: 'Review the impact',
+        header: 'Confirm',
+        intent: { kind: 'plan-review', approve: 'Yes' },
         options: [{ label: 'Yes' }, { label: 'No', description: 'decline' }],
       },
     ]);

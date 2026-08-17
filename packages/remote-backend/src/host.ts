@@ -238,11 +238,20 @@ export interface HostQuestionOption {
   description?: string;
 }
 
+/** Presentation intent carried by an upstream user-question item. */
+export type HostQuestionIntent = {
+  kind: 'plan-review';
+  approve: string;
+};
+
 /** One question of a host ask-user-question request. */
 export interface HostQuestionItem {
   id: string;
   question: string;
+  detail?: string;
+  header?: string;
   multiSelect?: boolean;
+  intent?: HostQuestionIntent;
   options: HostQuestionOption[];
 }
 
@@ -252,6 +261,8 @@ export interface HostQuestionRequest {
   sessionId?: string;
   /** Short human-readable summary of why input is needed. */
   summary?: string;
+  /** Abort signal owned by the host tool/step. */
+  signal?: AbortSignal;
   items: HostQuestionItem[];
 }
 

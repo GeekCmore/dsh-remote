@@ -178,10 +178,11 @@ directly via `node:fs`, poking private APIs) are out of scope by policy.
   `dsh-remote-backend serve --profile` self-bootstrap path, and attaches from
   a real local host with the bundle-daemon-tui seam swap, asserting
   create/history/fork over the wire end to end. Given `DSH_SMOKE_LLM_KEY` (or
-  `DEEPSEEK_API_KEY`) it additionally runs the LLM leg — a real prompt round
-  trip whose sandbox-escalation approval is answered by a local answerer
-  through the remote→local approval bridge (`llm=ok`; SKIP line and green
-  without a key). The wire `session.create` mints the remote session AND its
+  `DEEPSEEK_API_KEY`) it additionally runs the LLM leg — first a real
+  `ask_user_question` round trip answered by a local `userQuestions` provider,
+  then a sandbox-escalation approval answered through the local approval
+  waterfall (`llm=ok question=ok approval=ok`; SKIP line and green without a
+  key). The wire `session.create` mints the remote session AND its
   live agent together (upstream `ctx.agents.create` contract), so
   wire-created sessions are promptable.
 - **Live-mode frontend composition (decided + covered).** Live mode composes

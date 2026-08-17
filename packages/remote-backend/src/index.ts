@@ -240,17 +240,115 @@ function persistenceAccessFromContext(ctx: Context): PersistenceHostAccess | und
 /**
  * Narrow `ctx.userQuestions` (upstream provider registry for
  * ask_user_question). OPTIONAL: probed via {@link probeService}; undefined
- * when the host has none.
+ * when the host has none. The upstream service and the daemon wire use
+ * deliberately different shapes, so this is a bidirectional adapter rather
+ * than a structural cast: questions/options are normalized on the way in and
+ * the wire answer map is restored to upstream selected-label/custom answers
+ * on the way out.
  */
 function questionAccessFromContext(ctx: Context): QuestionHostAccess | undefined {
+  interface UpstreamQuestionOption {
+    label: string;
+    description?: string;
+  }
+  interface UpstreamQuestionIntent {
+    kind: 'plan-review';
+    approve: string;
+  }
+  interface UpstreamQuestionItem {
+    id: string;
+    question: string;
+    detail?: string;
+    header?: string;
+    options?: UpstreamQuestionOption[];
+    multiSelect?: boolean;
+    intent?: UpstreamQuestionIntent;
+  }
+  interface UpstreamQuestionRequest {
+    questions: UpstreamQuestionItem[];
+    agent?: { session?: { id: unknown } };
+    signal?: AbortSignal;
+  }
+  interface UpstreamQuestionAnswerItem {
+    id: string;
+    selected: string[];
+    custom?: string;
+  }
+  interface UpstreamQuestionAnswer {
+    answers: UpstreamQuestionAnswerItem[];
+  }
   const registry = probeService<{
     registerProvider(provider: {
-      ask(request: HostQuestionRequest): Promise<HostQuestionAnswers>;
+      ask(request: UpstreamQuestionRequest): Promise<UpstreamQuestionAnswer>;
     }): () => void;
   }>(ctx, 'userQuestions');
   if (!registry) return undefined;
   return {
-    registerProvider: (provider) => registry.registerProvider(provider),
+    registerProvider: (provider) =>
+      registry.registerProvider({
+        ask: async (request) => {
+          const optionsByItem = new Map<string, Map<string, string>>();
+          const items = request.questions.map((question) => {
+            const optionLabels = new Map<string, string>();
+            const options = (question.options ?? []).map((option, index) => {
+              const id = `option-${index}`;
+              optionLabels.set(id, option.label);
+              return {
+                id,
+                label: option.label,
+                ...(option.description !== undefined
+                  ? { description: option.description }
+                  : {}),
+              };
+            });
+            optionsByItem.set(question.id, optionLabels);
+            return {
+              id: question.id,
+              question: question.question,
+              ...(question.detail !== undefined ? { detail: question.detail } : {}),
+              ...(question.header !== undefined ? { header: question.header } : {}),
+              ...(question.multiSelect !== undefined
+                ? { multiSelect: question.multiSelect }
+                : {}),
+              ...(question.intent !== undefined ? { intent: question.intent } : {}),
+              options,
+            };
+          });
+          const hostAnswers = await provider.ask({
+            ...(request.agent?.session?.id !== undefined
+              ? { sessionId: String(request.agent.session.id) }
+              : {}),
+            ...(request.signal !== undefined ? { signal: request.signal } : {}),
+            items,
+          });
+          const answers: UpstreamQuestionAnswerItem[] = [];
+          for (const question of request.questions) {
+            const value = hostAnswers[question.id];
+            if (value === undefined) continue;
+            if (!question.multiSelect && Array.isArray(value)) {
+              throw new Error(`question "${question.id}" returned multiple answers for single-select item`);
+            }
+            const values = Array.isArray(value) ? value : [value];
+            const labels = optionsByItem.get(question.id)!;
+            const selected: string[] = [];
+            const custom: string[] = [];
+            for (const answer of values) {
+              const label = labels.get(answer);
+              if (label === undefined) custom.push(answer);
+              else selected.push(label);
+            }
+            if (custom.length > 1) {
+              throw new Error(`question "${question.id}" returned more than one custom answer`);
+            }
+            answers.push({
+              id: question.id,
+              selected,
+              ...(custom[0] !== undefined ? { custom: custom[0] } : {}),
+            });
+          }
+          return { answers };
+        },
+      }),
   };
 }
 
