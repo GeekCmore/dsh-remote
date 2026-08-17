@@ -165,8 +165,15 @@ export class FakeBackendBroker {
   }
 
   /** Directly register a session (test setup shortcut, no RPC). */
-  createSession(opts: { cwd?: string; title?: string } = {}): { sessionId: string } {
-    const sessionId = `s-${++this.sessionCounter}`;
+  createSession(
+    opts: { requestedSessionId?: string; cwd?: string; title?: string } = {},
+  ): { sessionId: string } {
+    const sessionId = opts.requestedSessionId ?? `s-${++this.sessionCounter}`;
+    if (this.sessions.has(sessionId)) {
+      throw new RemoteError('REMOTE_PROTOCOL_ERROR', `session already exists: ${sessionId}`, {
+        data: { requestedSessionId: sessionId },
+      });
+    }
     this.sessions.set(sessionId, {
       sessionId,
       cwd: opts.cwd ?? '/remote/work',
@@ -364,7 +371,11 @@ export class FakeBackendBroker {
       sessions: [...this.sessions.values()].map((s) => this.summary(s)),
     }));
     peer.on(Methods.SessionCreate, (params) => {
-      const p = (params ?? {}) as { cwd?: string; title?: string };
+      const p = (params ?? {}) as {
+        requestedSessionId?: string;
+        cwd?: string;
+        title?: string;
+      };
       return this.createSession(p);
     });
     peer.on(Methods.SessionAttach, (params) => this.attach(conn, params));

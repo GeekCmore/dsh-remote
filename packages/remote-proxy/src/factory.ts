@@ -5,9 +5,8 @@
  * use — produce remote-backed agents.
  *
  * - `createAgent`: creates the REMOTE session first (`client.create`,
- *   write-mode attach), then mirrors it. The caller-supplied
- *   `options.sessionId` CANNOT be honored (the daemon mints session ids; the
- *   wire has no client-chosen id) — the returned agent's id is the remote id.
+ *   write-mode attach), then mirrors it. Caller-supplied `options.sessionId`
+ *   is forwarded through the additive `requested-session-id` capability.
  *   A caller-supplied `seed` is rejected: a remote fork must match the
  *   daemon's own log prefix, so forking routes through `handle.fork` /
  *   `sessions.forkRemote` instead.
@@ -52,6 +51,7 @@ export class RemoteAgentFactory implements AgentFactory {
     }
     options.signal?.throwIfAborted();
     const handle = await this.deps.client.create(this.deps.targetId, {
+      requestedSessionId: options.sessionId as unknown as string,
       ...(options.meta?.cwd !== undefined ? { cwd: options.meta.cwd } : {}),
     });
     try {

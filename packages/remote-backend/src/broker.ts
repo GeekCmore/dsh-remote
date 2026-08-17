@@ -44,6 +44,7 @@ import type {
   AgentHostAccess,
   AttachmentsHostAccess,
   CompactionHostAccess,
+  HostAgent,
   HostSession,
   PersistenceHostAccess,
   SessionHostAccess,
@@ -149,6 +150,7 @@ export class SessionBroker {
    */
   get capabilities(): string[] {
     const caps: string[] = [Capabilities.ForkAtSeq];
+    if (this.#agents.create) caps.push(Capabilities.RequestedSessionId);
     if (this.#persistence) caps.push(Capabilities.History);
     if (this.#compaction) caps.push(Capabilities.Compact);
     if (this.#attachments) caps.push(Capabilities.PromptBlocks);
@@ -315,10 +317,23 @@ export class SessionBroker {
         'this host does not support session creation',
       );
     }
-    const agent = await this.#agents.create({
-      ...(params.cwd !== undefined ? { cwd: params.cwd } : {}),
-      ...(params.title !== undefined ? { title: params.title } : {}),
-    });
+    let agent: HostAgent;
+    try {
+      agent = await this.#agents.create({
+        ...(params.requestedSessionId !== undefined
+          ? { requestedSessionId: params.requestedSessionId }
+          : {}),
+        ...(params.cwd !== undefined ? { cwd: params.cwd } : {}),
+        ...(params.title !== undefined ? { title: params.title } : {}),
+      });
+    } catch (cause) {
+      if (params.requestedSessionId === undefined) throw cause;
+      throw new RemoteError(
+        'REMOTE_PROTOCOL_ERROR',
+        `cannot create requested session "${params.requestedSessionId}"`,
+        { cause, data: { requestedSessionId: params.requestedSessionId } },
+      );
+    }
     return { sessionId: agent.id };
   }
 

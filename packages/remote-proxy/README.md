@@ -56,8 +56,9 @@ intent; `time` / `ignorable` metadata is not preserved across the wire.
 `RemoteAgentFactory` (`registry.setFactory`):
 - `create` calls `client.create` (write-mode attach) and returns an
   `AgentHandle` whose `agent` is a `RemoteAgentFacade` over the mirrored
-  session. **The caller-supplied `sessionId` cannot be honored** — the
-  daemon mints session ids; the wire has no client-chosen id. `{ seed }` is
+  session. A caller-supplied `sessionId` is forwarded when the negotiated
+  `requested-session-id` capability is available; unsupported backends fail
+  explicitly instead of silently substituting a daemon-generated id. `{ seed }` is
   rejected: a remote fork must match the daemon's own log prefix — use
   `sessions.forkRemote(source, { atSeq })` (async) instead.
 - `resume` escalates an already-mirrored session's handle to write control
@@ -107,10 +108,12 @@ surfaced to the frontend's *existing* UI:
 - If an approval is settled remotely while a local prompt is still open,
   forwarding the local answer fails and is logged (first answer wins).
 
-## Not proxied (by design, v1)
+## Read-only catalog facades
 
-- **Catalogs** (`ctx.llm`, skills, agent presets) are NOT replaced — read
-  remote catalogs explicitly via `client.listCatalog` if needed.
+- **Catalogs** (`ctx.llm`, skills, agent presets) are replaced by read-only
+  remote facades backed by `client.listCatalog`. They expose catalog rows only;
+  model generation, skill loading, and preset composition remain remote-host
+  operations and are not executed by the local facade.
 - **`fsSnapshot` rollback / in-memory truncation**: time-travel is
   `sessions.forkRemote(source, { atSeq })`, matching daemon semantics.
 - **LSP** and other non-session seams stay local.

@@ -121,6 +121,33 @@ describe('ChannelMux', () => {
     await aCh.onClose;
   });
 
+  it('bounds unread payload bytes without discarding already accepted data', async () => {
+    const { aIn, bIn } = pipePair();
+    const sender = new ChannelMux({ send: (line) => bIn.push(line) }, aIn);
+    const receiver = new ChannelMux({ send: (line) => aIn.push(line) }, bIn, {
+      maxQueuedBytes: 5,
+    });
+    let remote!: MuxChannel;
+    receiver.onChannel((channel) => {
+      remote = channel;
+    });
+    const local = sender.openChannel(7, 'file');
+    await tick();
+    local.write(encoder.encode('abc'));
+    local.write(encoder.encode('def'));
+    await remote.onClose;
+    const iterator = remote.read[Symbol.asyncIterator]();
+    await expect(iterator.next()).resolves.toEqual({
+      value: encoder.encode('abc'),
+      done: false,
+    });
+    await expect(iterator.next()).rejects.toMatchObject({
+      code: 'REMOTE_PROTOCOL_ERROR',
+      message: expect.stringContaining('exceeded 5 queued bytes'),
+    });
+    await local.onClose;
+  });
+
   it('rejects duplicate local channel ids', async () => {
     const { muxA } = makeMuxes();
     muxA.openChannel(1, 'stdio');

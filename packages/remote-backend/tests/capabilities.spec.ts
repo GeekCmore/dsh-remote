@@ -31,22 +31,30 @@ describe('capability advertisement on the challenge', () => {
         Capabilities.PromptBlocks,
         Capabilities.Catalogs,
         Capabilities.PendingInteractions,
+        Capabilities.RequestedSessionId,
       ].sort(),
     );
   });
 
-  it('advertises only fork-at-seq + pending-interactions in a default world', async () => {
+  it('advertises creation id + fork-at-seq + pending-interactions in a default world', async () => {
     const world = makeWorld();
     const { challenge } = await handshakeWithChallenge(world.client);
     expect([...challenge.capabilities].sort()).toEqual(
-      [Capabilities.ForkAtSeq, Capabilities.PendingInteractions].sort(),
+      [
+        Capabilities.ForkAtSeq,
+        Capabilities.PendingInteractions,
+        Capabilities.RequestedSessionId,
+      ].sort(),
     );
   });
 
   it('advertises the bare minimum without an approval bridge', async () => {
     const world = makeWorld({ withApproval: false });
     const { challenge } = await handshakeWithChallenge(world.client);
-    expect(challenge.capabilities).toEqual([Capabilities.ForkAtSeq]);
+    expect(challenge.capabilities).toEqual([
+      Capabilities.ForkAtSeq,
+      Capabilities.RequestedSessionId,
+    ]);
   });
 });
 

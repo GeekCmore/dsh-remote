@@ -33,6 +33,12 @@ export { RemoteAgentFacade } from './agent.js';
 export { RemoteAgentFactory } from './factory.js';
 export { RemoteSessionPersistence } from './persistence.js';
 export { InteractionBridges, toWireAnswers } from './bridges.js';
+export {
+  RemoteAgentPresetsCatalog,
+  RemoteCatalogs,
+  RemoteLlmCatalog,
+  RemoteSkillsCatalog,
+} from './catalogs.js';
 export { SessionMirror, type MirrorDeps, type MirrorOptions } from './mirror.js';
 export { appendMirroredEvent, readRemoteHistory, type MirroredWireEvent } from './events.js';
 

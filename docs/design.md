@@ -103,6 +103,19 @@ frontend. One token may authorize many frontends; rotation is
 The backend assigns the client id in the handshake — it is the only client
 identity on the wire (leases name it; nothing is self-chosen).
 
+The v1 backend stores the high-entropy pairing token in a mode-`0600` config
+file. This protects against other UIDs, not same-UID processes, backups, or a
+disk snapshot. A plain SHA-256 token digest cannot replace the current HMAC
+key: using that digest as the key merely makes the digest an equivalent
+credential. Stronger at-rest protection requires encrypted/OS secret storage,
+public-key pairing, or a verifier/PAKE protocol.
+
+SSH server identity is a separate deployment responsibility. The transport
+offers a `hostVerifier` hook, but shipped bundles do not configure one by
+default. Production profiles must pin a fingerprint/use known-hosts, or
+document an external trusted-SSH boundary. Pairing authentication proves the
+frontend knows the token; it does not authenticate the SSH server.
+
 **Exclusive write lease** (per session, in-memory, never persisted):
 
 - `session.attach { mode: 'read' | 'write', sinceSeq? }` — read always

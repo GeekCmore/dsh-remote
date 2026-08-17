@@ -88,6 +88,8 @@ export interface AttachOptions {
 
 /** Options for `RemoteClient.create` / `RemoteSessions.create`. */
 export interface CreateRemoteSessionOptions {
+  /** Caller-selected session/agent id. Requires backend capability support. */
+  requestedSessionId?: string;
   /** Working directory for the new session (backend default when omitted). */
   cwd?: string;
   /** Human-readable title for the new session. */

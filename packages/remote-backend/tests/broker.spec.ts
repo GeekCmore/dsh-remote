@@ -38,6 +38,24 @@ describe('SessionBroker session.create', () => {
     expect(summary).toMatchObject({ status: 'idle', cwd: '/build' });
   });
 
+  it('honors a requested session id and reports conflicts explicitly', async () => {
+    const { sessions, agents, broker } = makeBroker();
+    const { conn } = fakeConnection('a');
+    broker.connect(conn);
+
+    await expect(
+      broker.create('a', { requestedSessionId: 'caller-chosen', cwd: '/build' }),
+    ).resolves.toEqual({ sessionId: 'caller-chosen' });
+    expect(sessions.get('caller-chosen')).toBeDefined();
+    expect(agents.get('caller-chosen')).toBeDefined();
+
+    const err = await expectRemoteError(
+      broker.create('a', { requestedSessionId: 'caller-chosen' }),
+      'REMOTE_PROTOCOL_ERROR',
+    );
+    expect(err.data).toEqual({ requestedSessionId: 'caller-chosen' });
+  });
+
   it('degrades to REMOTE_PROTOCOL_ERROR when the host has no agents.create', async () => {
     const sessions = new FakeSessionHost();
     const broker = new SessionBroker(sessions, { get: () => undefined });

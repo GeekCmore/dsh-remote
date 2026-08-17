@@ -93,7 +93,7 @@ describe('e2e: remote-backed upstream seams', () => {
       meta: { cwd: '/work' },
     });
     const id = handle.agent.id as unknown as string;
-    expect(id).toBe('created-1');
+    expect(id).toBe('caller-id');
     expect(created).toContain(id);
     // Back the fresh remote session with a fake agent so prompts land.
     s.rig.agents.add(id);

@@ -104,7 +104,7 @@ describe('capabilities', () => {
     await s.client.list('t1');
     const caps = s.client.capabilitiesOf('t1');
     expect(caps).toBeDefined();
-    for (const cap of ['history', 'compact', 'fork-at-seq', 'questions', 'prompt-blocks', 'catalogs', 'pending-interactions']) {
+    for (const cap of ['history', 'compact', 'fork-at-seq', 'questions', 'prompt-blocks', 'catalogs', 'pending-interactions', 'requested-session-id']) {
       expect(caps!.has(cap)).toBe(true);
     }
     // The public channel accessor exposes the same recorded set.
@@ -134,6 +134,9 @@ describe('capabilities', () => {
     await expect(s.client.listCatalog('t1', 'models')).rejects.toMatchObject({
       code: 'REMOTE_CAPABILITY_UNSUPPORTED',
     });
+    await expect(
+      s.client.create('t1', { requestedSessionId: 'caller-chosen' }),
+    ).rejects.toMatchObject({ code: 'REMOTE_CAPABILITY_UNSUPPORTED' });
     // Nothing was recorded backend-side: the failures were local.
     expect(s.broker.compactCalls).toHaveLength(0);
     expect(s.broker.forkCalls).toHaveLength(0);
@@ -179,8 +182,13 @@ describe('attach / events', () => {
     s.client.onSessionsChanged((targetId) => {
       changed.push(targetId);
     });
-    const handle = await s.client.create('t1', { cwd: '/work', title: 'Job' });
+    const handle = await s.client.create('t1', {
+      requestedSessionId: 'caller-chosen',
+      cwd: '/work',
+      title: 'Job',
+    });
     expect(handle.mode).toBe('write');
+    expect(handle.sessionId).toBe('caller-chosen');
     expect(changed).toEqual(['t1']);
     const list = await s.client.list('t1');
     expect(list).toEqual([

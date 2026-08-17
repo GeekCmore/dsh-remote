@@ -22,6 +22,42 @@ describe('catalog.list', () => {
     });
   });
 
+  it('awaits the real upstream async catalog methods', async () => {
+    const world = makeWorld({
+      catalogs: new FakeCatalogs({
+        llm: {
+          listProviders: async () => [{ id: 'async-provider' }],
+          listModels: async () => [{ id: 'async-model', name: 'Async Model' }],
+        },
+        skills: { list: async () => [{ name: 'async-skill' }] },
+        agentPresets: {
+          defaultId: 'async-preset',
+          list: async () => [{ id: 'async-preset' }],
+        },
+      }),
+    });
+    await handshake(world.client);
+    await expect(world.client.call(Methods.CatalogList, { kind: 'models' })).resolves.toEqual({
+      kind: 'models',
+      providers: [
+        {
+          provider: 'async-provider',
+          models: [{ id: 'async-model', name: 'Async Model' }],
+        },
+      ],
+    });
+    await expect(world.client.call(Methods.CatalogList, { kind: 'skills' })).resolves.toEqual({
+      kind: 'skills',
+      skills: [{ name: 'async-skill' }],
+    });
+    await expect(
+      world.client.call(Methods.CatalogList, { kind: 'agentPresets' }),
+    ).resolves.toEqual({
+      kind: 'agentPresets',
+      agentPresets: [{ id: 'async-preset', name: 'async-preset', isDefault: true }],
+    });
+  });
+
   it('lists skills and agent presets', async () => {
     const world = makeWorld({ catalogs: new FakeCatalogs() });
     await handshake(world.client);

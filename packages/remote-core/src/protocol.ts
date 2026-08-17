@@ -180,6 +180,8 @@ export interface SessionListResult {
 
 /** Parameters for {@link Methods.SessionCreate}. All fields optional. */
 export interface SessionCreateParams {
+  /** Caller-selected id. Requires the `requested-session-id` capability. */
+  requestedSessionId?: string;
   /** Working directory for the new session (host default when omitted). */
   cwd?: string;
   /** Human-readable title (hosts without title support silently drop it). */

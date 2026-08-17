@@ -56,6 +56,11 @@ interface PendingCall {
   reject: (err: unknown) => void;
 }
 
+export interface JsonRpcPeerOptions {
+  /** Default call deadline in milliseconds. Set to 0 to disable. */
+  requestTimeoutMs?: number;
+}
+
 /** Wire shape of `error.data` for errors raised from a {@link RemoteError}. */
 interface RemoteErrorData {
   remoteCode: string;
@@ -77,9 +82,18 @@ export class JsonRpcPeer {
   #notifications = new Map<string, NotificationHandler>();
   #closed: Promise<void>;
   #resolveClosed!: () => void;
+  #requestTimeoutMs: number;
 
-  constructor(outbound: JsonRpcOutbound, inbound: AsyncIterable<Uint8Array>) {
+  constructor(
+    outbound: JsonRpcOutbound,
+    inbound: AsyncIterable<Uint8Array>,
+    options: JsonRpcPeerOptions = {},
+  ) {
     this.#out = outbound;
+    this.#requestTimeoutMs = options.requestTimeoutMs ?? 30_000;
+    if (!Number.isFinite(this.#requestTimeoutMs) || this.#requestTimeoutMs < 0) {
+      throw new TypeError('JsonRpcPeer requestTimeoutMs must be a finite non-negative number');
+    }
     this.#decoder = new LineDecoder(undefined, (_raw, err) => {
       const detail = err instanceof Error ? err.message : String(err);
       this.#sendError(null, PARSE_ERROR, `parse error: ${detail}`);
@@ -110,22 +124,42 @@ export class JsonRpcPeer {
         reject(new RemoteError('REMOTE_ABORTED', `call "${method}" aborted`));
         return;
       }
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const cleanup = () => {
+        signal?.removeEventListener('abort', onAbort);
+        if (timer !== undefined) clearTimeout(timer);
+      };
       const onAbort = () => {
         if (!this.#pending.delete(id)) return;
         this.notify(CANCEL_METHOD, { id });
+        cleanup();
         reject(new RemoteError('REMOTE_ABORTED', `call "${method}" aborted`));
+      };
+      const onTimeout = () => {
+        if (!this.#pending.delete(id)) return;
+        this.notify(CANCEL_METHOD, { id });
+        cleanup();
+        reject(
+          new RemoteError(
+            'REMOTE_TIMEOUT',
+            `call "${method}" timed out after ${this.#requestTimeoutMs}ms`,
+          ),
+        );
       };
       this.#pending.set(id, {
         resolve: (value) => {
-          signal?.removeEventListener('abort', onAbort);
+          cleanup();
           resolve(value as T);
         },
         reject: (err) => {
-          signal?.removeEventListener('abort', onAbort);
+          cleanup();
           reject(err);
         },
       });
       signal?.addEventListener('abort', onAbort, { once: true });
+      if (this.#requestTimeoutMs > 0) {
+        timer = setTimeout(onTimeout, this.#requestTimeoutMs);
+      }
       this.#send({ jsonrpc: '2.0', id, method, ...(params !== undefined ? { params } : {}) });
     });
   }

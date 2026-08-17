@@ -45,6 +45,8 @@ export interface RemoteClientConfig {
     maxDelayMs?: number;
     maxAttempts?: number;
   };
+  /** Default deadline for one JSON-RPC call. Defaults to 30 seconds. */
+  requestTimeoutMs?: number;
   /**
    * Capability bits advertised in the handshake hello. Defaults to the full
    * known set ({@link CLIENT_CAPABILITIES}).
@@ -90,6 +92,7 @@ export class RemoteClient {
       reconnectInitialDelayMs: config.reconnect?.initialDelayMs ?? 250,
       reconnectMaxDelayMs: config.reconnect?.maxDelayMs ?? 10_000,
       reconnectMaxAttempts: config.reconnect?.maxAttempts ?? Number.POSITIVE_INFINITY,
+      requestTimeoutMs: config.requestTimeoutMs ?? 30_000,
       capabilities: config.capabilities ?? [...CLIENT_CAPABILITIES],
     };
   }
@@ -192,7 +195,19 @@ export class RemoteClient {
     opts: CreateRemoteSessionOptions = {},
   ): Promise<RemoteClientHandle> {
     const conn = await this.connection(targetId);
+    if (
+      opts.requestedSessionId !== undefined &&
+      !conn.capabilities.has(Capabilities.RequestedSessionId)
+    ) {
+      throw new RemoteError(
+        'REMOTE_CAPABILITY_UNSUPPORTED',
+        `target "${targetId}": backend does not support caller-selected session ids`,
+      );
+    }
     const result = await conn.call<SessionCreateResult>(Methods.SessionCreate, {
+      ...(opts.requestedSessionId !== undefined
+        ? { requestedSessionId: opts.requestedSessionId }
+        : {}),
       ...(opts.cwd !== undefined ? { cwd: opts.cwd } : {}),
       ...(opts.title !== undefined ? { title: opts.title } : {}),
     });

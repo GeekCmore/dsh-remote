@@ -142,8 +142,8 @@ export default function dshRemoteDaemonSmoke(ctx) {
 
     // --- 3. create a session through the seam swap ---------------------------
     // agents.create → RemoteAgentFactory.createAgent → client.create (write
-    // attach) + seq-exact mirror. The caller-supplied sessionId CANNOT be
-    // honored (the daemon mints ids); the returned agent.id IS the remote id.
+    // attach) + seq-exact mirror. The caller-supplied sessionId is forwarded
+    // when the negotiated requested-session-id capability is available.
     const created = await ctx.agents.create({
       sessionId: 'smoke-caller-id',
       meta: { cwd: '/home/dsh/work' },

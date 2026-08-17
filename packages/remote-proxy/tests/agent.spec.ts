@@ -42,16 +42,15 @@ describe('agents.create', () => {
       agentOptions: { provider: 'p', model: 'm' },
     });
 
-    // The daemon minted the id; the caller-supplied one is not honored.
-    expect(handle.agent.id).toBe('s-1');
-    expect(s.broker.holderOf('s-1')).not.toBeNull(); // write lease taken
+    expect(handle.agent.id).toBe('caller-chosen');
+    expect(s.broker.holderOf('caller-chosen')).not.toBeNull(); // write lease taken
     expect(handle.agent.options).toEqual({ provider: 'p', model: 'm' });
     expect(handle.agent.status).toBe('idle');
-    expect(handle.agent.session.id).toBe('s-1');
+    expect(handle.agent.session.id).toBe('caller-chosen');
     expect(handle.agent.session.events).toEqual([]);
     expect(handle.agent.inbox.hasPending).toBe(false);
-    expect(s.ctx.sessions.get(SessionId('s-1'))).toBe(handle.agent.session);
-    expect(s.ctx.agents.get(SessionId('s-1'))).toBe(handle.agent);
+    expect(s.ctx.sessions.get(SessionId('caller-chosen'))).toBe(handle.agent.session);
+    expect(s.ctx.agents.get(SessionId('caller-chosen'))).toBe(handle.agent);
     expect(created).toContain(handle.agent);
     expect(started).toEqual([{ agent: handle.agent, source: 'startup' }]);
     // The scoped agent context carries the association.

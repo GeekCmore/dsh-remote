@@ -142,10 +142,14 @@ function agentAccessFromContext(ctx: Context): AgentHostAccess {
     // the protocol title is dropped.
     ...(typeof registry.create === 'function' && defaultModel !== undefined
       ? {
-          create: async (options: { cwd?: string; title?: string }) => {
+          create: async (options: {
+            requestedSessionId?: string;
+            cwd?: string;
+            title?: string;
+          }) => {
             const selection = defaultModel.currentSelection();
             const handle = await registry.create!({
-              sessionId: `session-${randomUUID()}`,
+              sessionId: options.requestedSessionId ?? `session-${randomUUID()}`,
               ...(options.cwd !== undefined ? { meta: { cwd: options.cwd } } : {}),
               agentOptions: { provider: selection.provider, model: selection.model },
             });

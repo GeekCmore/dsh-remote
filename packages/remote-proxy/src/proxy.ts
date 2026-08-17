@@ -15,6 +15,7 @@ import { AgentRegistry } from '@deepseek-ai/dsh-agent';
 import type { Session, SessionForkSource, SessionId } from '@deepseek-ai/dsh-session';
 import type { RemoteClient } from '@dsh-remote/client';
 import { InteractionBridges } from './bridges.js';
+import { RemoteCatalogs } from './catalogs.js';
 import { RemoteAgentFactory } from './factory.js';
 import { SessionMirror, type MirrorOptions } from './mirror.js';
 import { RemoteSessionPersistence } from './persistence.js';
@@ -31,6 +32,7 @@ export class RemoteProxy {
   readonly persistence: RemoteSessionPersistence;
   readonly bridges: InteractionBridges;
   readonly factory: RemoteAgentFactory;
+  readonly catalogs: RemoteCatalogs;
   /** Live mirrors by session id. */
   readonly mirrors = new Map<string, SessionMirror>();
   /** Resolves when the activation-time reconcile (initial pre-mirror sweep) settled. */
@@ -47,6 +49,7 @@ export class RemoteProxy {
     this.client = client;
     this.targetId = config.targetId ?? 'default';
     this.logger = ctx.logger('dsh-remote/proxy');
+    this.catalogs = new RemoteCatalogs(ctx, client, this.targetId);
     this.store = new RemoteSessionStore(ctx);
     this.registry = new AgentRegistry(ctx);
     this.persistence = new RemoteSessionPersistence(ctx, {
@@ -69,7 +72,7 @@ export class RemoteProxy {
       if (targetId === this.targetId) void this.reconcile();
     });
     ctx.effect(() => () => this.dispose(), 'dsh-remote/proxy: detach mirrors and unwind services');
-    this.ready = this.reconcile();
+    this.ready = Promise.all([this.reconcile(), this.catalogs.ready]).then(() => undefined);
   }
 
   /** Create + register a mirror, de-duplicated by session id. */

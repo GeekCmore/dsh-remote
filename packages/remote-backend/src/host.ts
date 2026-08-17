@@ -154,7 +154,7 @@ export interface AgentHostAccess {
    * stack); when absent the backend answers `session.create` with
    * REMOTE_PROTOCOL_ERROR.
    */
-  create?(options: { cwd?: string; title?: string }): Promise<HostAgent>;
+  create?(options: { requestedSessionId?: string; cwd?: string; title?: string }): Promise<HostAgent>;
   /**
    * Subscribe to agent status transitions (upstream
    * `ctx.on('agent/status', ({ agent, status }) => …)`). Optional.
@@ -284,25 +284,38 @@ export interface QuestionHostAccess {
 /** Narrows the read subset of upstream `ctx.llm` used by the models catalog. */
 export interface CatalogLlmAccess {
   /** Upstream `ctx.llm.listProviders()`. */
-  listProviders(): { id: string }[];
+  listProviders(): { id: string }[] | Promise<{ id: string }[]>;
   /** Upstream `ctx.llm.listModels(providerId)`. */
-  listModels(providerId: string): {
-    id: string;
-    name?: string;
-    reasoningEfforts?: string[];
-    routable?: boolean;
-    current?: boolean;
-  }[];
+  listModels(providerId: string):
+    | {
+        id: string;
+        name?: string;
+        reasoningEfforts?: string[];
+        routable?: boolean;
+        current?: boolean;
+      }[]
+    | Promise<
+        {
+          id: string;
+          name?: string;
+          reasoningEfforts?: string[];
+          routable?: boolean;
+          current?: boolean;
+        }[]
+      >;
 }
 
 /** Narrows the read subset of upstream `ctx.skills`. */
 export interface CatalogSkillsAccess {
-  list(): { name: string; description?: string }[];
+  list(): { name: string; description?: string }[] | Promise<{ name: string; description?: string }[]>;
 }
 
 /** Narrows the read subset of upstream `ctx.agentPresets`. */
 export interface CatalogAgentPresetsAccess {
-  list(): { id: string; name: string; description?: string; isDefault: boolean }[];
+  readonly defaultId: string;
+  list():
+    | { id: string; name?: string; description?: string }[]
+    | Promise<{ id: string; name?: string; description?: string }[]>;
 }
 
 /**

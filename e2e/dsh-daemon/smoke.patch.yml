@@ -47,6 +47,32 @@
   name: '@deepseek-ai/dsh-agent-loop'
   disabled: true
 
+# Catalogs are owned by the remote host in daemon mode. The proxy re-provides
+# these service keys as read-only catalog facades.
+- id: llm
+  name: '@deepseek-ai/dsh-llm'
+  disabled: true
+
+- id: llm-pi-ai
+  name: '@deepseek-ai/dsh-llm-pi-ai'
+  disabled: true
+
+- id: llm-deepseek
+  name: '@deepseek-ai/dsh-llm-deepseek'
+  disabled: true
+
+- id: skill
+  name: '@deepseek-ai/dsh-skill'
+  disabled: true
+
+- id: skill-filesystem
+  name: '@deepseek-ai/dsh-skill-filesystem'
+  disabled: true
+
+- id: tool-skill
+  name: '@deepseek-ai/dsh-tool-skill'
+  disabled: true
+
 # dsh-base rows `session-title` / `session-title-llm`: the LOCAL title
 # generators. Disabled in daemon mode (bundle row sync): they append
 # local-only `session/title` events in reaction to mirrored `session/event`s,

@@ -47,6 +47,7 @@ describe('protocol vocabulary', () => {
     expect(Capabilities.PromptBlocks).toBe('prompt-blocks');
     expect(Capabilities.Catalogs).toBe('catalogs');
     expect(Capabilities.PendingInteractions).toBe('pending-interactions');
+    expect(Capabilities.RequestedSessionId).toBe('requested-session-id');
   });
 
   it('pins the appended error code', () => {

@@ -72,8 +72,9 @@ export class FakeSessionHost implements SessionHostAccess {
    * id); the broker no longer calls this directly — wire `session.create`
    * routes through the agent host.
    */
-  create(options: { cwd?: string; title?: string } = {}): FakeSession {
-    const id = `created-${this.sessions.size + 1}`;
+  create(options: { requestedSessionId?: string; cwd?: string; title?: string } = {}): FakeSession {
+    const id = options.requestedSessionId ?? `created-${this.sessions.size + 1}`;
+    if (this.sessions.has(id)) throw new Error(`session already exists: ${id}`);
     const session = new FakeSession(id, {
       createdAt: Date.now(),
       ...(options.cwd !== undefined ? { cwd: options.cwd } : {}),
@@ -178,7 +179,9 @@ export class FakeAgentHost implements AgentHostAccess {
    * `AgentRegistry.create` backing: mint a fresh session AND its live agent
    * under one shared id, so the created session is immediately promptable.
    */
-  async create(options: { cwd?: string; title?: string } = {}): Promise<FakeAgent> {
+  async create(
+    options: { requestedSessionId?: string; cwd?: string; title?: string } = {},
+  ): Promise<FakeAgent> {
     const session = this.sessionHost?.create(options);
     return this.add(session?.id ?? `created-${this.agents.size + 1}`);
   }
@@ -310,7 +313,8 @@ export class FakeCatalogs implements CatalogHostAccess {
       list: () => [{ name: 'review', description: 'Code review' }],
     };
     this.agentPresets = data.agentPresets ?? {
-      list: () => [{ id: 'default', name: 'Default', isDefault: true }],
+      defaultId: 'default',
+      list: () => [{ id: 'default', name: 'Default' }],
     };
   }
 }

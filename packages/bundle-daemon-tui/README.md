@@ -40,7 +40,7 @@ challenge-response handshake — no TCP port is opened on the remote host.
 
 ## What the patch does
 
-Applied after `@deepseek-ai/dsh-base`, the layer **disables** four base
+Applied after `@deepseek-ai/dsh-base`, the layer **disables** ten base
 rows and **inserts** three new ones:
 
 Disabled (a patch cannot change a row's plugin `name`, so swapping a
@@ -57,6 +57,10 @@ provider = disable the base row + insert a new one):
    itself as THE agent factory on `ctx.agents` (`ctx.agents.setFactory`),
    which conflicts with remote-proxy's RemoteAgentFactory; in daemon mode
    the loop runs inside the remote host.
+5. `llm`, `llm-pi-ai`, and `llm-deepseek` — local model runtime/provider
+   rows; the proxy exposes the remote host's read-only model catalog instead.
+6. `skill`, `skill-filesystem`, and `tool-skill` — local skill runtime rows;
+   the proxy exposes the remote host's read-only skill catalog instead.
 
 Inserted:
 
@@ -161,10 +165,10 @@ follows its own documentation.
 - **No fsSnapshot rollback.** File-state snapshots/restores tied to session
   checkpoints are not part of the daemon protocol; fork-at-seq restores
   conversation state only.
-- **Catalogs are the local host's own rows in v1.** Model/provider catalogs
-  (the `llm` rows, settings, credentials) come from the *local* profile's
-  base rows, not the remote host's — pickers show local configuration while
-  generation happens remotely. Keep both sides' model settings aligned.
+- **Catalogs are read-only remote rows.** Model/provider, skill, and agent
+  preset pickers are populated through `catalog.list` from the remote host.
+  The local facade does not execute remote LLM calls, skills, or presets;
+  those operations remain owned by the daemon host.
 
 ## Support boundary
 

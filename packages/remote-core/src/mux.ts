@@ -29,6 +29,14 @@ import {
   type DataFrame,
 } from './framing.js';
 
+/** Default unread payload budget for one logical channel (64 MiB). */
+export const DEFAULT_MAX_QUEUED_BYTES = 64 * 1024 * 1024;
+
+export interface ChannelMuxOptions {
+  /** Maximum unread payload bytes buffered per channel. */
+  maxQueuedBytes?: number;
+}
+
 /** Channel id reserved for the daemon control channel (JSON-RPC). */
 export const CONTROL_CHANNEL = 0;
 
@@ -65,14 +73,22 @@ class MuxChannelImpl implements MuxChannel {
 
   #sendFrame: (frame: DataFrame) => void;
   #queue: Uint8Array[] = [];
+  #queuedBytes = 0;
+  #maxQueuedBytes: number;
   #waiter: PullWaiter | null = null;
   #end: 'open' | 'done' | RemoteError = 'open';
   #resolveClose!: () => void;
 
-  constructor(id: number, type: string, sendFrame: (frame: DataFrame) => void) {
+  constructor(
+    id: number,
+    type: string,
+    sendFrame: (frame: DataFrame) => void,
+    maxQueuedBytes: number,
+  ) {
     this.id = id;
     this.type = type;
     this.#sendFrame = sendFrame;
+    this.#maxQueuedBytes = maxQueuedBytes;
     this.onClose = new Promise((resolve) => {
       this.#resolveClose = resolve;
     });
@@ -100,7 +116,14 @@ class MuxChannelImpl implements MuxChannel {
       this.#waiter = null;
       waiter.resolve({ value: payload, done: false });
     } else {
+      if (this.#queuedBytes + payload.byteLength > this.#maxQueuedBytes) {
+        const message = `channel ${this.id} exceeded ${this.#maxQueuedBytes} queued bytes`;
+        this.#sendFrame({ channel: this.id, type: 'error', message });
+        this._finish(new RemoteError('REMOTE_PROTOCOL_ERROR', message));
+        return;
+      }
       this.#queue.push(payload);
+      this.#queuedBytes += payload.byteLength;
     }
   }
 
@@ -117,7 +140,9 @@ class MuxChannelImpl implements MuxChannel {
     const waiter = this.#waiter;
     this.#waiter = null;
     if (this.#queue.length > 0) {
-      waiter.resolve({ value: this.#queue.shift()!, done: false });
+      const value = this.#queue.shift()!;
+      this.#queuedBytes -= value.byteLength;
+      waiter.resolve({ value, done: false });
     } else if (this.#end instanceof RemoteError) {
       waiter.reject(this.#end);
     } else {
@@ -127,7 +152,9 @@ class MuxChannelImpl implements MuxChannel {
 
   #pull(): Promise<IteratorResult<Uint8Array>> {
     if (this.#queue.length > 0) {
-      return Promise.resolve({ value: this.#queue.shift()!, done: false });
+      const value = this.#queue.shift()!;
+      this.#queuedBytes -= value.byteLength;
+      return Promise.resolve({ value, done: false });
     }
     if (this.#end instanceof RemoteError) return Promise.reject(this.#end);
     if (this.#end === 'done') return Promise.resolve({ value: undefined, done: true });
@@ -183,9 +210,18 @@ export class ChannelMux {
   #decoder = new LineDecoder(undefined, () => {});
   #closed: Promise<void>;
   #resolveClosed!: () => void;
+  #maxQueuedBytes: number;
 
-  constructor(outbound: MuxOutbound, inbound: AsyncIterable<Uint8Array>) {
+  constructor(
+    outbound: MuxOutbound,
+    inbound: AsyncIterable<Uint8Array>,
+    options: ChannelMuxOptions = {},
+  ) {
     this.#out = outbound;
+    this.#maxQueuedBytes = options.maxQueuedBytes ?? DEFAULT_MAX_QUEUED_BYTES;
+    if (!Number.isSafeInteger(this.#maxQueuedBytes) || this.#maxQueuedBytes < 0) {
+      throw new TypeError('ChannelMux maxQueuedBytes must be a non-negative safe integer');
+    }
     this.#closed = new Promise((resolve) => {
       this.#resolveClosed = resolve;
     });
@@ -222,7 +258,12 @@ export class ChannelMux {
   }
 
   #create(id: number, type: string): MuxChannelImpl {
-    const ch = new MuxChannelImpl(id, type, (frame) => this.#out.send(encodeDataFrame(frame)));
+    const ch = new MuxChannelImpl(
+      id,
+      type,
+      (frame) => this.#out.send(encodeDataFrame(frame)),
+      this.#maxQueuedBytes,
+    );
     this.#channels.set(id, ch);
     void ch.onClose.then(() => {
       if (this.#channels.get(id) === ch) this.#channels.delete(id);

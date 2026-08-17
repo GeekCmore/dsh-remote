@@ -362,7 +362,7 @@ export class BackendServer {
   }
 
   /** `catalog.list`: read-only catalogs, gated per kind. */
-  #catalogList(params: CatalogListParams): CatalogListResult {
+  async #catalogList(params: CatalogListParams): Promise<CatalogListResult> {
     const catalogs = this.#catalogs;
     const unsupported = (kind: string) =>
       new RemoteError('REMOTE_CAPABILITY_UNSUPPORTED', `this backend has no ${kind} catalog`);
@@ -370,20 +370,23 @@ export class BackendServer {
       case 'models': {
         const llm = catalogs?.llm;
         if (!llm) throw unsupported('models');
+        const providers = await llm.listProviders();
         return {
           kind: 'models',
-          providers: llm.listProviders().map((provider) => ({
-            provider: provider.id,
-            models: llm.listModels(provider.id).map((model) => ({
-              id: model.id,
-              ...(model.name !== undefined ? { name: model.name } : {}),
-              ...(model.reasoningEfforts !== undefined
-                ? { reasoningEfforts: model.reasoningEfforts }
-                : {}),
-              ...(model.routable !== undefined ? { routable: model.routable } : {}),
-              ...(model.current !== undefined ? { current: model.current } : {}),
+          providers: await Promise.all(
+            providers.map(async (provider) => ({
+              provider: provider.id,
+              models: (await llm.listModels(provider.id)).map((model) => ({
+                id: model.id,
+                ...(model.name !== undefined ? { name: model.name } : {}),
+                ...(model.reasoningEfforts !== undefined
+                  ? { reasoningEfforts: model.reasoningEfforts }
+                  : {}),
+                ...(model.routable !== undefined ? { routable: model.routable } : {}),
+                ...(model.current !== undefined ? { current: model.current } : {}),
+              })),
             })),
-          })),
+          ),
         };
       }
       case 'skills': {
@@ -391,7 +394,7 @@ export class BackendServer {
         if (!skills) throw unsupported('skills');
         return {
           kind: 'skills',
-          skills: skills.list().map((skill) => ({
+          skills: (await skills.list()).map((skill) => ({
             name: skill.name,
             ...(skill.description !== undefined ? { description: skill.description } : {}),
           })),
@@ -402,11 +405,11 @@ export class BackendServer {
         if (!presets) throw unsupported('agentPresets');
         return {
           kind: 'agentPresets',
-          agentPresets: presets.list().map((preset) => ({
+          agentPresets: (await presets.list()).map((preset) => ({
             id: preset.id,
-            name: preset.name,
+            name: preset.name ?? preset.id,
             ...(preset.description !== undefined ? { description: preset.description } : {}),
-            isDefault: preset.isDefault,
+            isDefault: preset.id === presets.defaultId,
           })),
         };
       }

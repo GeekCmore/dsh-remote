@@ -69,6 +69,8 @@ export interface TargetConnectionConfig {
   reconnectInitialDelayMs: number;
   reconnectMaxDelayMs: number;
   reconnectMaxAttempts: number;
+  /** Default JSON-RPC request deadline. */
+  requestTimeoutMs: number;
   /** Feature bits advertised in the handshake hello (defaults to the full known set). */
   capabilities: string[];
   /** Called when a session reports status `ended` (for sessions-changed fanout). */
@@ -161,14 +163,14 @@ export class TargetConnection {
    * channel is down or reconnecting; in-flight calls reject with
    * REMOTE_CONN_LOST on their own when the byte stream drops.
    */
-  call<T = unknown>(method: string, params?: unknown): Promise<T> {
+  call<T = unknown>(method: string, params?: unknown, signal?: AbortSignal): Promise<T> {
     const peer = this.peer;
     if (this.state !== 'connected' || !peer) {
       return Promise.reject(
         new RemoteError('REMOTE_CONN_LOST', `target "${this.targetId}": daemon channel is down`),
       );
     }
-    return peer.call<T>(method, params);
+    return peer.call<T>(method, params, signal);
   }
 
   /**
@@ -258,7 +260,11 @@ export class TargetConnection {
     void (async () => {
       for await (const chunk of proc.stderr) void chunk;
     })().catch(() => undefined);
-    const peer = new JsonRpcPeer({ send: (line) => proc.write(line) }, proc.stdout);
+    const peer = new JsonRpcPeer(
+      { send: (line) => proc.write(line) },
+      proc.stdout,
+      { requestTimeoutMs: this.config.requestTimeoutMs },
+    );
     let clientId: string;
     let capabilities: string[];
     try {

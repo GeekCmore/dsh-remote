@@ -96,6 +96,24 @@ describe('JsonRpcPeer', () => {
     });
   });
 
+  it('times out a pending call, sends $/cancel and ignores the late response', async () => {
+    const inbound = new BytePipe();
+    const sent: Uint8Array[] = [];
+    const peer = new JsonRpcPeer({ send: (line) => sent.push(line) }, inbound, {
+      requestTimeoutMs: 5,
+    });
+    await expect(peer.call('hang')).rejects.toMatchObject({ code: 'REMOTE_TIMEOUT' });
+    expect(decodeLines(sent)).toEqual([
+      { jsonrpc: '2.0', id: 1, method: 'hang' },
+      { jsonrpc: '2.0', method: '$/cancel', params: { id: 1 } },
+    ]);
+    inbound.push(encodeLine({ jsonrpc: '2.0', id: 1, result: 'late' }));
+    await tick();
+    expect(decodeLines(sent)).toHaveLength(2);
+    inbound.end();
+    await peer.closed;
+  });
+
   it('rejects all pending calls with REMOTE_CONN_LOST when the stream ends', async () => {
     const { a, b, aIn } = makePeers();
     b.on('hang', () => new Promise(() => {}));

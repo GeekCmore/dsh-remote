@@ -60,6 +60,8 @@ export const Capabilities = {
   Catalogs: 'catalogs',
   /** `session.attach` results carrying `pendingInteractions`. */
   PendingInteractions: 'pending-interactions',
+  /** `session.create` with a caller-selected `requestedSessionId`. */
+  RequestedSessionId: 'requested-session-id',
 } as const;
 
 /** A known capability bit ({@link Capabilities} value). */

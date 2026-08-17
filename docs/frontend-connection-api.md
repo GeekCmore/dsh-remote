@@ -170,7 +170,7 @@ directly via `node:fs`, poking private APIs) are out of scope by policy.
   real-stack e2e over in-memory byte pipes). Known degradations are
   documented in `packages/remote-proxy/README.md` (sync `sessions.create`
   cannot round-trip — use the async path; rewind = fork-at-seq; catalogs are
-  the local host's own rows in v1; mirror freezes on seq violation rather
+  read-only remote rows via `catalog.list`; mirror freezes on seq violation rather
   than corrupting the log).
 - **Daemon smoke (covered, repeatedly green).** `e2e/dsh-daemon`
   (`pnpm smoke:dsh-daemon`) deploys a real headless dsh into the
@@ -202,6 +202,14 @@ directly via `node:fs`, poking private APIs) are out of scope by policy.
   the official apiproxy unmodified requires remote-backed versions (or
   explicit local semantics) for the rest. This is a deliberate later
   milestone — no web-specific work is started.
+- **Agent inbox delivery parity (deferred).** The proxy currently projects
+  `send`/`followup`/`steer`/`inject` through the ordinary prompt path. This
+  loses the upstream next-turn/next-step and wake/no-wake distinctions, and
+  non-text attachment references are not yet translated into wire image
+  blocks. The rc.7 attachment APIs make image admission/persistence feasible,
+  but preserving inbox delivery semantics still requires additive wire
+  fields or methods. Until then this is a documented compatibility limit,
+  not a silent claim of full agent-inbox parity.
 - **Still open.** Web parity (above); client SDK documentation.
 - **Frontend neutrality (decided).** Frontend-private seams (e.g. a TUI's
   workspace/shell-escape registry) are adapted on the frontend's own

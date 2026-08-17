@@ -137,6 +137,14 @@ describe('hostAccessFromContext agents.create wiring', () => {
     expect(registry.createCalls[0]!.meta).toBeUndefined();
   });
 
+  it('passes a caller-selected session id to the upstream registry', async () => {
+    const { ctx, registry } = fakeContext({ services: { agentDefaultModel: DEFAULT_MODEL } });
+    const host = hostAccessFromContext(ctx);
+    const agent = await host.agents.create!({ requestedSessionId: 'caller-chosen' });
+    expect(agent.id).toBe('caller-chosen');
+    expect(registry.createCalls[0]!.sessionId).toBe('caller-chosen');
+  });
+
   it('leaves create absent when the host has no agentDefaultModel service', () => {
     const { ctx } = fakeContext();
     const host = hostAccessFromContext(ctx);
