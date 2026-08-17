@@ -82,6 +82,49 @@ importers:
         specifier: ^3.2.0
         version: 3.2.7(@types/node@24.13.3)
 
+  packages/live-runtime:
+    dependencies:
+      ssh2:
+        specifier: ^1.17.0
+        version: 1.17.0
+    devDependencies:
+      '@deepseek-ai/cordis':
+        specifier: ^4.0.1
+        version: 4.0.1(@deepseek-ai/cordis-plugin-include@1.0.6)(@deepseek-ai/cordis-plugin-loader@1.0.2)
+      '@dsh-remote/fs-ssh':
+        specifier: workspace:*
+        version: link:../fs-ssh
+      '@dsh-remote/remote':
+        specifier: workspace:*
+        version: link:../remote
+      '@dsh-remote/remote-frontend':
+        specifier: workspace:*
+        version: link:../remote-frontend
+      '@dsh-remote/remote-ssh':
+        specifier: workspace:*
+        version: link:../remote-ssh
+      '@dsh-remote/seams':
+        specifier: workspace:*
+        version: link:../seams
+      '@dsh-remote/subprocess-ssh':
+        specifier: workspace:*
+        version: link:../subprocess-ssh
+      '@types/node':
+        specifier: ^24.0.0
+        version: 24.13.3
+      '@types/ssh2':
+        specifier: ^1.15.0
+        version: 1.15.5
+      esbuild:
+        specifier: ^0.28.2
+        version: 0.28.2
+      typescript:
+        specifier: ^5.9.0
+        version: 5.9.3
+      vitest:
+        specifier: ^3.2.0
+        version: 3.2.7(@types/node@24.13.3)
+
   packages/remote:
     devDependencies:
       '@deepseek-ai/cordis':

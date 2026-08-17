@@ -1,0 +1,46 @@
+{
+  "name": "@dsh-remote/live-runtime",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Self-contained Git-installable runtime for dsh-remote live mode",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "types",
+    "scripts"
+  ],
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "prepare": "pnpm run build",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run --passWithNoTests"
+  },
+  "dependencies": {
+    "ssh2": "^1.17.0"
+  },
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "^4.0.1"
+  },
+  "devDependencies": {
+    "@deepseek-ai/cordis": "^4.0.1",
+    "@dsh-remote/fs-ssh": "workspace:*",
+    "@dsh-remote/remote": "workspace:*",
+    "@dsh-remote/remote-frontend": "workspace:*",
+    "@dsh-remote/remote-ssh": "workspace:*",
+    "@dsh-remote/seams": "workspace:*",
+    "@dsh-remote/subprocess-ssh": "workspace:*",
+    "@types/node": "^24.0.0",
+    "@types/ssh2": "^1.15.0",
+    "esbuild": "^0.28.2",
+    "typescript": "^5.9.0",
+    "vitest": "^3.2.0"
+  }
+}
