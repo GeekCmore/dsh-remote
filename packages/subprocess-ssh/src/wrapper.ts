@@ -222,16 +222,21 @@ set +e
 dsh_id=$1
 dsh_root=$2
 dsh_dir="$dsh_root/terminals/$dsh_id"
-mapfile -d '' -t dsh_argv < "$dsh_dir/argv" || exit 125
-mapfile -d '' -t dsh_env < "$dsh_dir/environment" || exit 125
-dsh_cwd=$(cat "$dsh_dir/cwd") || exit 125
-dsh_marker=$(cat "$dsh_dir/marker") || exit 125
+dsh_fail() {
+  printf '%s\n' "$1" > "$dsh_dir/error" 2>/dev/null
+  exit 125
+}
+mapfile -d '' -t dsh_argv < "$dsh_dir/argv" || dsh_fail 'cannot read argv setup'
+mapfile -d '' -t dsh_env < "$dsh_dir/environment" || dsh_fail 'cannot read environment setup'
+dsh_cwd=$(cat "$dsh_dir/cwd") || dsh_fail 'cannot read cwd setup'
+dsh_marker=$(cat "$dsh_dir/marker") || dsh_fail 'cannot read marker setup'
 rm -f -- "$dsh_dir/argv" "$dsh_dir/environment" "$dsh_dir/cwd" "$dsh_dir/marker"
-[ "\${#dsh_argv[@]}" -ge 1 ] || exit 125
-printf '%s\\n' "$$" > "$dsh_dir/pid"
+[ "\${#dsh_argv[@]}" -ge 1 ] || dsh_fail 'empty argv setup'
+printf '%s\\n' "$$" > "$dsh_dir/pid" || dsh_fail 'cannot publish pid'
 dsh_tty=$(tty 2>/dev/null)
-printf '%s\\n' "\${dsh_tty#/dev/}" > "$dsh_dir/tty"
-cd -- "$dsh_cwd" 2>/dev/null || exit 126
+[ -n "$dsh_tty" ] || dsh_fail 'cannot determine tty'
+printf '%s\\n' "\${dsh_tty#/dev/}" > "$dsh_dir/tty" || dsh_fail 'cannot publish tty'
+cd -- "$dsh_cwd" 2>/dev/null || dsh_fail "cannot chdir: $dsh_cwd"
 printf '%s' "$dsh_marker"
 exec env -i -- "\${dsh_env[@]}" "\${dsh_argv[@]}"
 `;
