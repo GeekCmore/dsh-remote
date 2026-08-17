@@ -9,8 +9,11 @@
 # whole `config`/flags but CANNOT change the row's plugin `name` (a `name`
 # mismatch skips the patch with a warning), so swapping a provider means
 # disabling the base row and inserting a new one. `!!js` expressions evaluate
-# against the entry's cordis context, so the closures below read the
-# `remoteHub` service lazily at call time (reconnects are picked up).
+# against the entry's cordis context UNDER THE LOADER ISOLATE: reading a
+# service (e.g. `remoteHub`) from a closure would require an inject
+# declaration, so the provider rows below use their declarative `target`
+# option instead — it resolves the hub lazily per call via the reflect
+# store, which needs no inject and picks up reconnects.
 
 # dsh-base row `fs-sandbox` (@deepseek-ai/dsh-fs-sandbox): the sandboxed local
 # ctx.fs backend. Disabled; fs-ssh takes over the `fs` service. Note the local
@@ -32,7 +35,7 @@
     # environment; restate this row's WHOLE config in your profile
     # cordis.patch.yml to pin real hosts (patching replaces, never merges).
     # If you rename the target id, also restate the fs-ssh/subprocess-ssh
-    # rows — their closures reference the id 'default'.
+    # rows — their `target` configs reference the id 'default'.
     - id: remote-ssh
       name: '@dsh-remote/remote-ssh'
       config:
@@ -46,14 +49,16 @@
               auth: { type: agent }
 
     # ctx.fs over SFTP + exec (fs seam, 12 primitives; replaces fs-sandbox).
+    # `target` selects the remote-ssh target's transport; the hub is resolved
+    # lazily per call (mounting order and reconnects are both safe).
     - id: fs-ssh
       name: '@dsh-remote/fs-ssh'
       config:
-        getTransport: !!js "() => remoteHub.get('default')"
+        target: default
 
     # ctx.subprocess over exec wrapper + PTY (replaces subprocess-local).
+    # `target` also derives the per-connection remote runtime root.
     - id: subprocess-ssh
       name: '@dsh-remote/subprocess-ssh'
       config:
-        getTransport: !!js "() => remoteHub.get('default')"
-        runtimeRoot: !!js "() => remoteHub.runtimeRoot('default')"
+        target: default

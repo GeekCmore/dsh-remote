@@ -3,13 +3,17 @@
  * `dsh-remote-backend` CLI.
  *
  * - `init [--rotate-token]`: generate/rotate the pairing token (see init.ts).
- * - `serve`: run the stdio protocol server. Standalone serve has NO dsh host
- *   behind it — session/agent calls see an empty world (useful for handshake
- *   and plumbing smoke tests). The production path is the Cordis plugin
- *   (index.ts) mounted into a headless dsh, which calls runServe with the
- *   real `ctx.sessions`/`ctx.agents` narrowed through host.ts.
+ * - `serve [--profile <name>]`: run the stdio protocol server. Without
+ *   `--profile` there is NO dsh host behind it — session/agent calls see an
+ *   empty world (useful for handshake and plumbing smoke tests). With
+ *   `--profile` (the production daemon form) the bin boots the named dsh
+ *   profile in-process via `@deepseek-ai/dsh-app-boot` (profile-boot.ts);
+ *   the profile's `@dsh-remote/backend` plugin row (index.ts) then mounts
+ *   the real `ctx.sessions`/`ctx.agents` narrowed through host.ts and takes
+ *   over stdio.
  */
 import { runInit } from './init.js';
+import { parseServeArgs, serveProfile } from './profile-boot.js';
 import { runServe } from './serve.js';
 import type {
   AgentHostAccess,
@@ -42,21 +46,46 @@ async function main(argv: string[]): Promise<void> {
     case 'init':
       await runInit({ rotateToken: args.includes('--rotate-token') });
       return;
-    case 'serve':
-      await runServe({
-        sessions: emptySessionHost(),
-        agents: emptyAgentHost(),
-        diag,
-      });
+    case 'serve': {
+      let serveArgs;
+      try {
+        serveArgs = parseServeArgs(args);
+      } catch (err) {
+        diag(err instanceof Error ? err.message : String(err));
+        process.exitCode = 2;
+        return;
+      }
+      if (serveArgs.profile === undefined) {
+        // Standalone: no dsh host, empty world (handshake smoke only).
+        await runServe({
+          sessions: emptySessionHost(),
+          agents: emptyAgentHost(),
+          diag,
+        });
+        return;
+      }
+      // Production form: boot the profile in-process; the profile's
+      // @dsh-remote/backend plugin row takes over stdio during boot. Once
+      // serveProfile returns, process lifetime belongs to the mounted tree
+      // (same as `dsh --profile`). Boot failures fail loud on stderr with a
+      // non-zero exit so the SSH exec channel surfaces them.
+      try {
+        await serveProfile(serveArgs.profile, { diag });
+      } catch (err) {
+        diag(err instanceof Error ? (err.stack ?? err.message) : String(err));
+        process.exitCode = 1;
+      }
       return;
+    }
     case undefined:
     case '--help':
     case '-h':
       process.stderr.write(
         'usage: dsh-remote-backend <command>\n' +
           '  init [--rotate-token]   generate the pairing token (printed once)\n' +
-          '  serve                   run the stdio protocol server (empty host standalone;\n' +
-          '                          mount the Cordis plugin for a real dsh host)\n',
+          '  serve [--profile NAME]  run the stdio protocol server; without --profile an\n' +
+          '                          empty host (handshake smoke only), with --profile boot\n' +
+          '                          the named dsh profile in-process (production daemon form)\n',
       );
       return;
     default:

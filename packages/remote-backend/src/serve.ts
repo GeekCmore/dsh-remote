@@ -270,7 +270,7 @@ export class BackendServer {
 
   #registerMethods(clientId: string): void {
     const peer = this.peer;
-    peer.on(Methods.SessionList, () => ({ sessions: this.#broker.list() }));
+    peer.on(Methods.SessionList, async () => ({ sessions: await this.#broker.list() }));
     peer.on(Methods.SessionCreate, (params) =>
       this.#broker.create(clientId, (params ?? {}) as SessionCreateParams),
     );

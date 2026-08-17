@@ -1,0 +1,101 @@
+# dsh-daemon smoke overlay (applied after the profile layer via `dsh --patch`).
+#
+# This file is a COPY of every row in packages/bundle-daemon-tui/
+# cordis.patch.yml: the bundle is pure yml and the `--patch` overlay mechanism
+# is isomorphic to the bundle layer mechanism (same id-targeted patch
+# semantics: a patch replaces a row's whole `config`/flags but CANNOT change
+# the row's plugin `name`, so swapping a provider means disabling the base row
+# and inserting a new one; `!!js` expressions evaluate against the entry's
+# cordis context). Two smoke-specific adaptations:
+#
+#   (a) the remote-ssh target uses key auth against the throwaway daemon-host
+#       container, with host/port/username/key taken from the DSH_TEST_SSH_*
+#       environment exported by integration/run-sshd.sh;
+#   (b) a final insert mounts ./smoke-plugin.mjs (relative specifier — resolves
+#       inside the profile directory; run-smoke.sh copies the plugin there).
+#
+# Keep this file in sync with the bundle when the bundle's rows change.
+
+# dsh-base row `session` (@deepseek-ai/dsh-session): the local ctx.sessions
+# store. Disabled; remote-proxy takes over the `sessions` service key with a
+# remote-backed implementation.
+- id: session
+  name: '@deepseek-ai/dsh-session'
+  disabled: true
+
+# dsh-base row `agent` (@deepseek-ai/dsh-agent): the local ctx.agents
+# registry. Disabled; remote-proxy takes over the `agents` service key.
+- id: agent
+  name: '@deepseek-ai/dsh-agent'
+  disabled: true
+
+# dsh-base row `session-persistence-jsonl`
+# (@deepseek-ai/dsh-session-persistence-jsonl): the local ctx.sessionPersistence
+# backend (append-only JSONL logs under $DSH_HOME). Disabled; remote-proxy
+# takes over the `sessionPersistence` service key. Session logs then live only
+# on the remote host — nothing session-shaped is written to the local disk.
+- id: session-persistence-jsonl
+  name: '@deepseek-ai/dsh-session-persistence-jsonl'
+  disabled: true
+
+# dsh-base row `agent-loop` (@deepseek-ai/dsh-agent-loop): the LOCAL agent
+# loop. It registers itself as THE agent factory on ctx.agents
+# (`ctx.agents.setFactory(this)`), which conflicts with remote-proxy's
+# RemoteAgentFactory ("an agent factory is already registered"). In daemon
+# mode the loop runs inside the remote host, so the local row is disabled.
+- id: agent-loop
+  name: '@deepseek-ai/dsh-agent-loop'
+  disabled: true
+
+- insert:
+    # Connection owner (ssh2). Smoke adaptation (a): key auth + DSH_TEST_SSH_*
+    # env (the bundle ships `auth: { type: agent }` and DSH_REMOTE_* env).
+    # The pairingTokenRef names the env var holding the pairing token —
+    # resolved by the remote-daemon row below.
+    - id: remote-ssh
+      name: '@dsh-remote/remote-ssh'
+      config:
+        targets:
+          - id: default
+            pairingTokenRef: DSH_REMOTE_TOKEN
+            ssh:
+              host: !!js "process.env.DSH_TEST_SSH_HOST ?? 'localhost'"
+              port: !!js "Number(process.env.DSH_TEST_SSH_PORT ?? 10023)"
+              username: !!js "process.env.DSH_TEST_SSH_USER ?? 'dsh'"
+              auth: { type: key, privateKeyPath: !!js "process.env.DSH_TEST_SSH_KEY" }
+
+    # ctx.remoteSessions: session list/attach/prompt/cancel/fork over the
+    # daemon protocol, with exclusive-write leases and seq-cursor resume.
+    # `backendCommand` is the ssh-exec command that serves the protocol on the
+    # remote host: the A0 shape, `dsh-remote-backend serve --profile daemon`,
+    # run from the remote profile's own node_modules/.bin (the profile boots
+    # in-process via @deepseek-ai/dsh-app-boot and its @dsh-remote/backend row
+    # takes over stdio). Overridable via DSH_REMOTE_BACKEND_COMMAND.
+    - id: remote-daemon
+      name: '@dsh-remote/remote-daemon'
+      # DaemonRemoteSessions reads ctx.remoteHub in its constructor; the
+      # loader only grants service access to fibers whose entry declares the
+      # inject list (Inject.resolve over entry options).
+      inject: [remoteHub]
+      config:
+        resolveToken: !!js "async (ref) => { const token = process.env[ref]; if (!token) throw new Error(`pairing token env var not set: ${ref}`); return token; }"
+        backendCommand: !!js "process.env.DSH_REMOTE_BACKEND_COMMAND ?? '/home/dsh/.dsh/profiles/daemon/node_modules/.bin/dsh-remote-backend serve --profile daemon'"
+
+    # The seam swap itself: remote-backed ctx.sessions / ctx.agents /
+    # ctx.sessionPersistence driving the remote headless dsh through
+    # ctx.remoteSessions (remote-daemon above), plus the bridges that relay
+    # remote approval/question requests into the LOCAL ctx.approval /
+    # ctx.userQuestions services (the dsh-base `approval` and `user-questions`
+    # rows stay — frontend answerers render against them as usual).
+    # `targetId` selects the remote-ssh target; 'default' is the plugin's own
+    # default, restated here for documentation value.
+    - id: remote-proxy
+      name: '@dsh-remote/proxy'
+      config:
+        targetId: 'default'
+
+    # Smoke adaptation (b): the assertion plugin. Relative specifier — resolves
+    # beside the profile root config, i.e. inside the profile directory
+    # (run-smoke.sh copies smoke-plugin.mjs there).
+    - id: dsh-remote-daemon-smoke
+      name: './smoke-plugin.mjs'

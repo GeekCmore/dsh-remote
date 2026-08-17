@@ -9,9 +9,13 @@
  * packages/core/agent/src/{index,runtime-types}.ts):
  *
  * - SessionStore (`ctx.sessions`): `get(id: SessionId): Session | undefined`,
- *   `list(): Session[]`, `fork(source, boundary?, childSessionId?): Session`;
+ *   `list(): Session[]`, `create(id?: SessionId, options?: CreateSessionOptions): Session`,
+ *   `fork(source, boundary?, childSessionId?): Session`;
  *   event feed via `ctx.on('session/event', (session, event) => …)` and
- *   `ctx.on('session/disposed', (session) => …)`.
+ *   `ctx.on('session/disposed', (session) => …)`. Cold (persisted but not
+ *   live) sessions come from `SessionPersistence.list(): Promise<SessionHeader[]>`
+ *   (`ctx.sessionPersistence`), wired onto {@link SessionHostAccess.listCold}
+ *   by index.ts.
  * - Session: `id: SessionId` (branded string), `header: SessionHeader`
  *   (`cwd?`, `createdAt`, …), `events: readonly SessionEvent[]`,
  *   `seq: number` (next seq = log length).
@@ -74,9 +78,15 @@ export interface SessionHostAccess {
    */
   fork(source: string, boundary?: number, atSeq?: number): HostSession;
   /**
-   * Create a fresh live session (`session.create` backing). OPTIONAL: not
-   * every host supports ad-hoc session creation; when absent the backend
-   * answers `session.create` with REMOTE_PROTOCOL_ERROR.
+   * Create a fresh live session, narrowed from upstream
+   * `SessionStore.create(id?, options?)`: the id is omitted (the store mints
+   * it) and the protocol's `{cwd, title}` fold into `options.meta` —
+   * `meta.cwd` must be an ABSOLUTE path (upstream validates and throws).
+   * Upstream `SessionHeader` has no title field, so a protocol title is
+   * silently dropped (the wire contract explicitly allows hosts without
+   * title support to do so). OPTIONAL: not every host supports ad-hoc
+   * session creation; when absent the backend answers `session.create` with
+   * REMOTE_PROTOCOL_ERROR.
    */
   create?(options: { cwd?: string; title?: string }): HostSession;
   /**
@@ -89,8 +99,14 @@ export interface SessionHostAccess {
    * Optional: without it, attached clients are not told when a session ends.
    */
   onSessionDisposed?(listener: (session: HostSession) => void): () => void;
-  /** Optional cold-session listing (persistence index); absent means none. */
-  listCold?(): ColdSessionInfo[];
+  /**
+   * Optional cold-session listing, wired to the persistence index (upstream
+   * `SessionPersistence.list()`, which is async and resolves `SessionHeader[]`
+   * — headers carry no lastSeq, so it is absent on those entries). A sync
+   * return is also accepted (in-memory hosts and the standalone `serve`).
+   * Absent means no cold sessions.
+   */
+  listCold?(): ColdSessionInfo[] | Promise<ColdSessionInfo[]>;
 }
 
 /**

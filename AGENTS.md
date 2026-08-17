@@ -41,13 +41,22 @@ pnpm --filter @dsh-remote/subprocess-ssh test
 integration/run-sshd.sh stop
 ```
 
-End-to-end smoke against a real `dsh` host (packs the packages, boots the dsh
-CLI on a scratch `DSH_HOME`, swaps the fs/subprocess provider rows via a
-`--patch` overlay, exercises them against the sshd container):
+End-to-end smokes against a real `dsh` host:
 
 ```sh
 pnpm smoke:dsh-host        # e2e/dsh-host/run-smoke.sh; needs docker, node, npm, pnpm
+pnpm smoke:dsh-daemon      # e2e/dsh-daemon/run-smoke.sh; needs docker + npm registry access
 ```
+
+- `smoke:dsh-host` (live mode) packs the packages, boots the dsh CLI on a
+  scratch `DSH_HOME`, and exercises the fs/subprocess providers against the
+  sshd container in two scenarios: a hand-written `--patch` overlay and the
+  bundle-live mechanism.
+- `smoke:dsh-daemon` (daemon mode) boots the `integration/daemon-host`
+  container through the parameterized `run-sshd.sh`, deploys a real headless
+  dsh + `@dsh-remote/backend` onto it (`dsh-remote-backend init` +
+  `serve --profile`), and attaches from a real local host with the
+  bundle-daemon-tui seam swap, asserting create/history/fork over the wire.
 
 ## Package layout (`packages/*`)
 
@@ -64,7 +73,7 @@ pnpm smoke:dsh-host        # e2e/dsh-host/run-smoke.sh; needs docker, node, npm,
 | `remote-daemon` | `@dsh-remote/remote-daemon` | thin cordis adapter: exposes the client as `ctx.remoteSessions`, token config, `remote/sessions-changed` |
 | `remote-proxy` | `@dsh-remote/proxy` | remote-backed implementations of the official session seams (`sessions`/`agents`/`sessionPersistence` via real upstream Service classes + remote replay); bridges remote approvals/questions into the local services — daemon-mode transparency for seam-compliant in-process frontends |
 | `remote-frontend` | `@dsh-remote/remote-frontend` | transfer/preview (`ctx.remoteTransfer`), monitor (`ctx.remoteMonitor`), `remote_copy` model tool |
-| `remote-backend` | `@dsh-remote/backend` | daemon-side Cordis plugin (broker, approval + question bridges, lease, monitor, transfer, history/compact/catalog endpoints) + `dsh-remote-backend` CLI (`init` / `serve`) |
+| `remote-backend` | `@dsh-remote/backend` | daemon-side Cordis plugin (broker, approval + question bridges, lease, monitor, transfer, history/compact/catalog endpoints) + `dsh-remote-backend` CLI (`init` issues the pairing token; `serve --profile <name>` boots the profile in-process) |
 | `bundle-live` / `bundle-daemon` / `bundle-daemon-tui` | `@dsh-remote/bundle-*` | dsh profile bundles — composition only, `cordis.patch.yml`, no code |
 
 Note the npm-name mismatches: `remote-core` → `@dsh-remote/core`,
@@ -107,7 +116,12 @@ frontends consuming the official dsh seams are supported.
   `config`/flags but **cannot change the row's plugin `name`** (mismatch =
   skip with warning), so swapping a provider means disabling the base row and
   inserting a new one. `!!js` closures evaluate against the entry's cordis
-  context and resolve services lazily. Validate changes with
+  context and resolve services lazily. Loader isolate semantics: a `!!js`
+  closure that reads a service free variable (e.g. `() =>
+  remoteHub.get('default')`) must declare that service in the row's `inject`
+  or activation throws; prefer the providers' declarative `target` option
+  (fs-ssh/subprocess-ssh `target: default`), which resolves the hub lazily
+  and is isolate-safe. Validate changes with
   `pnpm smoke:dsh-host`, which applies the same patch mechanics against the
   real dsh host.
 

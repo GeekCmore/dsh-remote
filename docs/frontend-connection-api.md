@@ -172,6 +172,22 @@ directly via `node:fs`, poking private APIs) are out of scope by policy.
   cannot round-trip — use the async path; rewind = fork-at-seq; catalogs are
   the local host's own rows in v1; mirror freezes on seq violation rather
   than corrupting the log).
+- **Daemon smoke (covered, repeatedly green).** `e2e/dsh-daemon`
+  (`pnpm smoke:dsh-daemon`) deploys a real headless dsh into the
+  `integration/daemon-host` container, boots it via the
+  `dsh-remote-backend serve --profile` self-bootstrap path, and attaches from
+  a real local host with the bundle-daemon-tui seam swap, asserting
+  create/history/fork over the wire end to end.
+- **Live-mode frontend composition (decided + covered).** Live mode composes
+  with TUI-family profiles through the standard bundle mechanism:
+  `@dsh-remote/bundle-live` applies after `@deepseek-ai/dsh-base`, and
+  `dsh plugin add` registers its patch into `dsh.profile.bundles` — smoke
+  tested as the "bundle" scenario in `e2e/dsh-host`. The dsh-base
+  `sandbox`/`sandbox-policy` rows deliberately stay enabled (bash-sandbox
+  hard-injects them; disabling is boot-fatal); the resulting bash-tool
+  semantics — locally probed bwrap/landlock argv executed on the remote host,
+  fail-closed where no remote runner exists — are documented in
+  `packages/bundle-live/README.md`.
 - **Web parity (deferred).** The official web stack's host side hard-injects
   11 services (`agentDefaultModel, agents, attachments, directoryPicker, llm,
   sessions, subagents, sessionQuery, tools, userQuestions, workspaceRegistry`)
@@ -179,6 +195,9 @@ directly via `node:fs`, poking private APIs) are out of scope by policy.
   the official apiproxy unmodified requires remote-backed versions (or
   explicit local semantics) for the rest. This is a deliberate later
   milestone — no web-specific work is started.
+- **Still open.** Web parity (above); a `tui-workspaces` provider; client
+  SDK documentation; hygiene dedup (e.g. the twin-copy fakes noted in
+  `packages/remote-proxy/tests/fake-backend.ts`).
 
 ## Evidence appendix: which seams the surveyed frontends consume
 

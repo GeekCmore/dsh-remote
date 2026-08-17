@@ -14,16 +14,33 @@ for remote-aware frontends), this bundle goes one step further: it *swaps*
 the seam implementations themselves, so a frontend that was written against
 the stock dsh seams attaches to the remote host **unmodified**.
 
-The remote half is `@dsh-remote/remote-backend`, deployed once per target
-with `dsh-remote-backend init` (installs the backend plugin into the remote
-headless profile and issues the 256-bit pairing token). The daemon channel
-runs as an SSH exec process (`dsh-remote-backend serve`) speaking newline
-JSON-RPC on stdio with an HMAC challenge-response handshake — no TCP port is
-opened on the remote host.
+The remote half is `@dsh-remote/backend`. Deploying it is two steps:
+(a) lay down a remote dsh profile whose tree contains `@deepseek-ai/dsh-base`
+plus the backend row below (install the profile's dependencies into
+`$DSH_HOME/profiles/<name>/`):
+
+```yaml
+- insert:
+    - id: dsh-remote-backend
+      name: '@dsh-remote/backend'
+      inject: [sessions, agents]
+```
+
+The `inject` list is contractual: `sessions` and `agents` are required and
+gate activation, while the optional services (sessionPersistence,
+userQuestions, llm, skills, agentPresets, compaction, attachments) are probed
+at runtime — declaring one of them in `inject` deadlocks activation if the
+profile never provides it. (b) run `dsh-remote-backend init` there, which
+only writes the 256-bit pairing token (printed once; config dir
+`$DSH_REMOTE_CONFIG_DIR`, default `~/.config/dsh-remote`). The daemon
+channel then runs as an SSH exec process
+(`dsh-remote-backend serve --profile <name>`, which boots that profile
+in-process) speaking newline JSON-RPC on stdio with an HMAC
+challenge-response handshake — no TCP port is opened on the remote host.
 
 ## What the patch does
 
-Applied after `@deepseek-ai/dsh-base`, the layer **disables** three base
+Applied after `@deepseek-ai/dsh-base`, the layer **disables** four base
 rows and **inserts** three new ones:
 
 Disabled (a patch cannot change a row's plugin `name`, so swapping a
@@ -35,6 +52,11 @@ provider = disable the base row + insert a new one):
    (`@deepseek-ai/dsh-session-persistence-jsonl`) — the local
    `ctx.sessionPersistence` backend. Session logs then live only on the
    remote host.
+4. `agent-loop` (`@deepseek-ai/dsh-agent-loop`) — the local agent loop.
+   Unlike rows that merely *inject* `sessions`/`agents`, it registers
+   itself as THE agent factory on `ctx.agents` (`ctx.agents.setFactory`),
+   which conflicts with remote-proxy's RemoteAgentFactory; in daemon mode
+   the loop runs inside the remote host.
 
 Inserted:
 
@@ -55,10 +77,11 @@ Inserted:
 
 Everything else stays: rows that merely *inject* `sessions`/`agents`
 (session titles, `/compact`, subagent tooling, …) keep working because the
-proxy re-provides the same service keys, and the local execution world
-(`fs-sandbox`, `subprocess`, sandboxes) is untouched — in daemon mode
-execution happens inside the remote host, never rerouted from the local
-process.
+proxy re-provides the same service keys (`agent-loop` is the exception —
+it claims the agent *factory*, so it is disabled; see above), and the local
+execution world (`fs-sandbox`, `subprocess`, sandboxes) is untouched — in
+daemon mode execution happens inside the remote host, never rerouted from
+the local process.
 
 ## Composition
 
@@ -89,10 +112,13 @@ follows its own documentation.
 
 ## Prerequisites
 
-1. On the remote host: `dsh-remote-backend init` — installs the backend
-   plugin into a headless dsh profile and prints the pairing token once.
-   The remote host needs Node + that headless profile; see the
-   `@dsh-remote/backend` README.
+1. On the remote host: lay down a dsh profile (say `daemon`) with
+   `@deepseek-ai/dsh-base` in `dsh.profile.bundles` and the backend row shown
+   above (`inject: [sessions, agents]`) in its `cordis.patch.yml`, install
+   its dependencies (the remote host needs Node), then run
+   `dsh-remote-backend init` — prints the pairing token once. The exec
+   command on that host is `dsh-remote-backend serve --profile daemon`;
+   see `@dsh-remote/bundle-daemon`'s README for the same two-step deploy.
 2. Locally: export the token under the ref name (default
    `DSH_REMOTE_TOKEN`), and point the target at the host via the
    environment — `DSH_REMOTE_HOST`, `DSH_REMOTE_PORT` (default 22),

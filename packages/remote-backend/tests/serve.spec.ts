@@ -55,13 +55,13 @@ describe('serve over the wire: lifecycle integration', () => {
     await handshake(world.client, TEST_TOKEN);
     world.sessions.add('s1');
     await world.client.call(Methods.SessionAttach, { sessionId: 's1', mode: 'write' });
-    expect(world.broker.list()[0]!.controller).toBe('client-1');
+    expect((await world.broker.list())[0]!.controller).toBe('client-1');
 
     // Client disappears (EOF on the server's inbound byte stream).
     world.serverInbound.end();
     await world.server.closed;
     await tick();
-    const summary = world.broker.list()[0]!;
+    const summary = (await world.broker.list())[0]!;
     expect(summary.controller).toBeNull();
     expect(summary.attachedClients).toBe(0);
   });

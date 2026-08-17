@@ -1,0 +1,45 @@
+# dsh-host smoke overlay, scenario "bundle" (applied after the profile layer
+# via `dsh --patch`).
+#
+# In this scenario the profile already carries @dsh-remote/bundle-live's own
+# cordis.patch.yml (registered via `dsh plugin add` → dsh.profile.bundles),
+# which disables the fs-sandbox/subprocess rows and inserts remote-ssh +
+# fs-ssh + subprocess-ssh itself. This overlay therefore does NOT repeat any
+# of that — repeating the disables would defeat the purpose of validating the
+# bundle mechanism. It does exactly two things:
+#
+#   1. restate the bundle's `remote-ssh` row config (patches replace, never
+#      merge) so the shipped `default` target points at the throwaway sshd
+#      container with key auth, read from the DSH_TEST_SSH_* environment
+#      (same `!!js` env-reading style as the bundle's own row);
+#   2. mount the smoke plugin, which asserts the mounted services and runs a
+#      real readText + echo round-trip through the `default` target
+#      (autoConnect above connects it; the plugin's own `main` target
+#      registration is redundant here but kept so one plugin serves both
+#      scenarios).
+#
+# A successful boot additionally proves the kept dsh-base sandbox /
+# sandbox-policy rows coexist with our providers (disabling them is fatal:
+# bash-sandbox hard-injects them and assertEntriesActivated treats a failed
+# entry as boot-fatal).
+
+- id: remote-ssh
+  name: '@dsh-remote/remote-ssh'
+  config:
+    autoConnect: true
+    targets:
+      - id: default
+        ssh:
+          host: !!js "process.env.DSH_TEST_SSH_HOST ?? 'localhost'"
+          port: !!js "Number(process.env.DSH_TEST_SSH_PORT ?? 22)"
+          username: !!js "process.env.DSH_TEST_SSH_USER ?? 'dsh'"
+          readyTimeoutMs: 15000
+          auth:
+            type: key
+            privateKeyPath: !!js "process.env.DSH_TEST_SSH_KEY"
+
+- insert:
+    # Relative specifier: resolves beside the profile root config, i.e. inside
+    # the profile directory (run-smoke.sh copies smoke-plugin.mjs there).
+    - id: dsh-remote-smoke
+      name: './smoke-plugin.mjs'

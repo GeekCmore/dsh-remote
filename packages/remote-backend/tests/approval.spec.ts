@@ -98,7 +98,7 @@ describe('ApprovalBridge routing', () => {
 
     const raised = host.raise({ sessionId: 's1', kind: 'exec', summary: 'x' });
     await tick();
-    expect(broker.list().find((s) => s.sessionId === 's1')!.status).toBe('waiting-approval');
+    expect((await broker.list()).find((s) => s.sessionId === 's1')!.status).toBe('waiting-approval');
     expect(a.notifications).toContainEqual({
       method: Notifications.SessionStatus,
       params: { sessionId: 's1', status: 'waiting-approval' },
@@ -108,7 +108,7 @@ describe('ApprovalBridge routing', () => {
       .params as ApprovalRequestParams;
     bridge.answer('a', { requestId: req.requestId, decision: 'approve' });
     await raised;
-    expect(broker.list().find((s) => s.sessionId === 's1')!.status).toBe('idle');
+    expect((await broker.list()).find((s) => s.sessionId === 's1')!.status).toBe('idle');
   });
 
   it('rejects answers from non-target clients and unknown request ids', async () => {

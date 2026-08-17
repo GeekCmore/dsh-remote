@@ -3,12 +3,21 @@
 # connection parameters as JSON on stdout. Usage:
 #   eval "$(integration/run-sshd.sh start)"   # exports DSH_TEST_SSH_* vars
 #   integration/run-sshd.sh stop
+#
+# Image, build context, container name and host port are overridable via
+# DSH_SSHD_IMAGE / DSH_SSHD_CONTEXT / DSH_SSHD_CONTAINER / DSH_SSHD_PORT so
+# the daemon-mode smoke (e2e/dsh-daemon) can boot its own container
+# (integration/daemon-host) alongside this one. The defaults below reproduce
+# the original behavior exactly — fs-ssh/subprocess-ssh integration tests
+# depend on it.
 set -euo pipefail
 
-IMAGE=dsh-remote-test-sshd
-CONTAINER=dsh-remote-test-sshd
-KEY_DIR="$(cd "$(dirname "$0")" && pwd)/.keys"
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+KEY_DIR="$(cd "$(dirname "$0")" && pwd)/.keys"
+IMAGE="${DSH_SSHD_IMAGE:-dsh-remote-test-sshd}"
+CONTAINER="${DSH_SSHD_CONTAINER:-dsh-remote-test-sshd}"
+CONTEXT="${DSH_SSHD_CONTEXT:-$ROOT/integration/sshd}"
+PORT="${DSH_SSHD_PORT:-10022}"
 
 case "${1:-}" in
   start)
@@ -16,9 +25,8 @@ case "${1:-}" in
     if [ ! -f "$KEY_DIR/id_ed25519" ]; then
       ssh-keygen -t ed25519 -N '' -f "$KEY_DIR/id_ed25519" -C dsh-remote-test >/dev/null
     fi
-    docker build -q -t "$IMAGE" "$ROOT/integration/sshd" >/dev/null
+    docker build -q -t "$IMAGE" "$CONTEXT" >/dev/null
     docker rm -f "$CONTAINER" >/dev/null 2>&1 || true
-    PORT=10022
     docker run -d --name "$CONTAINER" -p "127.0.0.1:${PORT}:22" \
       -e "PUBKEY=$(cat "$KEY_DIR/id_ed25519.pub")" "$IMAGE" >/dev/null
     # wait for sshd to accept connections

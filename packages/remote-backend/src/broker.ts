@@ -178,8 +178,12 @@ export class SessionBroker {
     }
   }
 
-  /** `session.list`: live sessions plus cold ones from the persistence index. */
-  list(): SessionSummary[] {
+  /**
+   * `session.list`: live sessions plus cold ones from the persistence index.
+   * Async because the cold half may be backed by an async persistence store
+   * (upstream `SessionPersistence.list()` returns a promise).
+   */
+  async list(): Promise<SessionSummary[]> {
     const out: SessionSummary[] = [];
     const liveIds = new Set<string>();
     for (const session of this.#sessions.list()) {
@@ -194,7 +198,7 @@ export class SessionBroker {
         createdAt: session.header.createdAt,
       });
     }
-    for (const cold of this.#sessions.listCold?.() ?? []) {
+    for (const cold of (await this.#sessions.listCold?.()) ?? []) {
       if (liveIds.has(cold.id)) continue;
       out.push({
         sessionId: cold.id,

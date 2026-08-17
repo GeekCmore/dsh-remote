@@ -2,7 +2,9 @@
  * Cordis plugin entry: `@dsh-remote/backend` mounted into a headless remote
  * dsh. `apply` narrows the real `ctx.sessions` / `ctx.agents` / approval
  * waterfall through the structural interfaces in host.ts (double-cast at
- * exactly this boundary) and starts the stdio protocol server.
+ * exactly this boundary) and starts the stdio protocol server. Required
+ * services are gate-kept by the row's `inject` declaration; optional
+ * services are probed isolate-safely via `ctx.get` (see probeService).
  *
  * The casts are safe by construction: host.ts declares precisely the members
  * this package reads, and each member maps 1:1 to an upstream signature
@@ -46,6 +48,33 @@ interface EventSource {
 }
 
 /**
+ * Soft probe for OPTIONAL host services, safe under the loader isolate.
+ *
+ * The cordis loader runs every entry in an isolate where plain property
+ * access (`ctx.sessionPersistence`) THROWS for any service the row did not
+ * declare via `inject` — yet declaring a hard `inject` on a service the
+ * profile never provides deadlocks activation. `ctx.get` (the reflect
+ * mixin) reads the service store WITHOUT the inject requirement and yields
+ * undefined for absent services, which is exactly the optional-probe
+ * semantic. Non-strict (`false`) because activation is availability-driven:
+ * at apply() time a provider may have registered its implementation while
+ * its fiber is still starting, and the value is already constructed.
+ *
+ * REQUIRED services (sessions, agents) are NOT probed this way — the row's
+ * `inject: [sessions, agents]` declaration gates activation on them, so the
+ * narrowings below read them as plain properties.
+ */
+function probeService<T>(ctx: Context, name: string): T | undefined {
+  try {
+    return ctx.get(name, false) as T | undefined;
+  } catch {
+    // A host without the reflect mixin (non-loader contexts) degrades to
+    // "service absent" rather than failing the plugin.
+    return undefined;
+  }
+}
+
+/**
  * Narrow `ctx.sessions` (upstream `SessionStore`) to {@link SessionHostAccess}.
  * Upstream `SessionId` is a branded string; the brand is compile-time-only,
  * so plain strings cross the boundary unchanged.
@@ -54,12 +83,23 @@ function sessionAccessFromContext(ctx: Context): SessionHostAccess {
   const store = (ctx as unknown as { sessions: unknown }).sessions as {
     get(id: string): HostSession | undefined;
     list(): HostSession[];
+    create(id?: string, options?: { meta?: { cwd?: string } }): HostSession;
     fork(source: string, boundary?: number): HostSession;
   };
   const events = ctx as unknown as EventSource;
   return {
     get: (id) => store.get(id),
     list: () => store.list(),
+    // Upstream `SessionStore.create(id?, options?)`: the id is omitted (the
+    // store mints `session-<n>`) and the protocol's cwd folds into
+    // `options.meta`; meta.cwd must be absolute (upstream validates and
+    // throws, which the broker surfaces as REMOTE_PROTOCOL_ERROR). Upstream
+    // SessionHeader has no title field, so the protocol title is dropped.
+    create: (options) =>
+      store.create(
+        undefined,
+        options.cwd !== undefined ? { meta: { cwd: options.cwd } } : undefined,
+      ),
     // Upstream `boundary` is already an inclusive event boundary, so the
     // protocol's fork-at-seq rewind (`atSeq`) maps onto it directly.
     fork: (source, boundary, atSeq) => {
@@ -112,17 +152,16 @@ function approvalAccessFromContext(ctx: Context): ApprovalHostAccess {
 
 /**
  * Narrow `ctx.sessionPersistence` (upstream SessionPersistence). OPTIONAL:
- * returns undefined when the host has no persistence service, in which case
- * the `history` capability is not advertised.
+ * probed via {@link probeService}; returns undefined when the host has no
+ * persistence service, in which case the `history` capability is not
+ * advertised.
  */
 function persistenceAccessFromContext(ctx: Context): PersistenceHostAccess | undefined {
-  const persistence = (ctx as unknown as { sessionPersistence?: unknown }).sessionPersistence as
-    | {
-        inspect(id: string): unknown;
-        readFrom(id: string, fromSeq?: number): unknown;
-        list(): unknown;
-      }
-    | undefined;
+  const persistence = probeService<{
+    inspect(id: string): unknown;
+    readFrom(id: string, fromSeq?: number): unknown;
+    list(): unknown;
+  }>(ctx, 'sessionPersistence');
   if (!persistence) return undefined;
   return {
     inspect: (id) => persistence.inspect(id) as ReturnType<PersistenceHostAccess['inspect']>,
@@ -134,16 +173,15 @@ function persistenceAccessFromContext(ctx: Context): PersistenceHostAccess | und
 
 /**
  * Narrow `ctx.userQuestions` (upstream provider registry for
- * ask_user_question). OPTIONAL: undefined when the host has none.
+ * ask_user_question). OPTIONAL: probed via {@link probeService}; undefined
+ * when the host has none.
  */
 function questionAccessFromContext(ctx: Context): QuestionHostAccess | undefined {
-  const registry = (ctx as unknown as { userQuestions?: unknown }).userQuestions as
-    | {
-        registerProvider(provider: {
-          ask(request: HostQuestionRequest): Promise<HostQuestionAnswers>;
-        }): () => void;
-      }
-    | undefined;
+  const registry = probeService<{
+    registerProvider(provider: {
+      ask(request: HostQuestionRequest): Promise<HostQuestionAnswers>;
+    }): () => void;
+  }>(ctx, 'userQuestions');
   if (!registry) return undefined;
   return {
     registerProvider: (provider) => registry.registerProvider(provider),
@@ -152,31 +190,31 @@ function questionAccessFromContext(ctx: Context): QuestionHostAccess | undefined
 
 /**
  * Narrow the read-only catalog services (`ctx.llm`, `ctx.skills`,
- * `ctx.agentPresets`). OPTIONAL per member: a host may expose any subset.
- * Returns undefined when none of the three exist.
+ * `ctx.agentPresets`). OPTIONAL per member, each probed via
+ * {@link probeService}: a host may expose any subset. Returns undefined when
+ * none of the three exist.
  */
 function catalogAccessFromContext(ctx: Context): CatalogHostAccess | undefined {
-  const source = ctx as unknown as {
-    llm?: CatalogHostAccess['llm'];
-    skills?: CatalogHostAccess['skills'];
-    agentPresets?: CatalogHostAccess['agentPresets'];
-  };
+  const llm = probeService<CatalogHostAccess['llm']>(ctx, 'llm');
+  const skills = probeService<CatalogHostAccess['skills']>(ctx, 'skills');
+  const agentPresets = probeService<CatalogHostAccess['agentPresets']>(ctx, 'agentPresets');
   const out: CatalogHostAccess = {
-    ...(source.llm !== undefined ? { llm: source.llm } : {}),
-    ...(source.skills !== undefined ? { skills: source.skills } : {}),
-    ...(source.agentPresets !== undefined ? { agentPresets: source.agentPresets } : {}),
+    ...(llm !== undefined && llm !== null ? { llm } : {}),
+    ...(skills !== undefined && skills !== null ? { skills } : {}),
+    ...(agentPresets !== undefined && agentPresets !== null ? { agentPresets } : {}),
   };
   return out.llm || out.skills || out.agentPresets ? out : undefined;
 }
 
 /**
- * Narrow `ctx.compaction` (@deepseek-ai/dsh-compaction). OPTIONAL: undefined
- * when the host has no compaction service.
+ * Narrow `ctx.compaction` (@deepseek-ai/dsh-compaction). OPTIONAL: probed
+ * via {@link probeService}; undefined when the host has no compaction
+ * service.
  */
 function compactionAccessFromContext(ctx: Context): CompactionHostAccess | undefined {
-  const compaction = (ctx as unknown as { compaction?: unknown }).compaction as
-    | { compactNow(agent: HostAgent, signal?: AbortSignal): Promise<unknown> }
-    | undefined;
+  const compaction = probeService<{
+    compactNow(agent: HostAgent, signal?: AbortSignal): Promise<unknown>;
+  }>(ctx, 'compaction');
   if (!compaction) return undefined;
   return {
     compactNow: (agent, signal) => compaction.compactNow(agent, signal),
@@ -184,16 +222,60 @@ function compactionAccessFromContext(ctx: Context): CompactionHostAccess | undef
 }
 
 /**
- * Narrow `ctx.attachments` (image prompt blocks). OPTIONAL: undefined when
- * the host has no attachment store.
+ * Narrow `ctx.attachments` (image prompt blocks). OPTIONAL: probed via
+ * {@link probeService}; undefined when the host has no attachment store.
  */
 function attachmentsAccessFromContext(ctx: Context): AttachmentsHostAccess | undefined {
-  const attachments = (ctx as unknown as { attachments?: unknown }).attachments as
-    | AttachmentsHostAccess
-    | undefined;
+  const attachments = probeService<AttachmentsHostAccess>(ctx, 'attachments');
   if (!attachments) return undefined;
   return {
     saveImage: (input) => attachments.saveImage(input),
+  };
+}
+
+/**
+ * The full set of host narrowings apply() hands to runServe. Exported for
+ * tests: the isolate-safe probing and the create/listCold wiring are unit
+ * tested against a fake context without booting a server.
+ */
+export interface HostAccess {
+  sessions: SessionHostAccess;
+  agents: AgentHostAccess;
+  approvalHost: ApprovalHostAccess;
+  persistenceHost?: PersistenceHostAccess;
+  questionHost?: QuestionHostAccess;
+  catalogHost?: CatalogHostAccess;
+  compactionHost?: CompactionHostAccess;
+  attachmentsHost?: AttachmentsHostAccess;
+}
+
+/**
+ * Build every host narrowing from a real plugin context. REQUIRED services
+ * (sessions, agents) are read as properties — the row declares them via
+ * `inject`, so activation guarantees them; OPTIONAL services are probed
+ * through {@link probeService} (isolate-safe soft access). The broker's
+ * `listCold` hook is wired to the persistence index here: upstream cold
+ * sessions live in `SessionPersistence.list()`, not in the live store.
+ */
+export function hostAccessFromContext(ctx: Context): HostAccess {
+  const sessions = sessionAccessFromContext(ctx);
+  const persistenceHost = persistenceAccessFromContext(ctx);
+  if (persistenceHost) {
+    sessions.listCold = () => persistenceHost.list();
+  }
+  const questionHost = questionAccessFromContext(ctx);
+  const catalogHost = catalogAccessFromContext(ctx);
+  const compactionHost = compactionAccessFromContext(ctx);
+  const attachmentsHost = attachmentsAccessFromContext(ctx);
+  return {
+    sessions,
+    agents: agentAccessFromContext(ctx),
+    approvalHost: approvalAccessFromContext(ctx),
+    ...(persistenceHost !== undefined ? { persistenceHost } : {}),
+    ...(questionHost !== undefined ? { questionHost } : {}),
+    ...(catalogHost !== undefined ? { catalogHost } : {}),
+    ...(compactionHost !== undefined ? { compactionHost } : {}),
+    ...(attachmentsHost !== undefined ? { attachmentsHost } : {}),
   };
 }
 
@@ -206,20 +288,16 @@ export function apply(ctx: Context): void {
     }
     process.stderr.write(`[dsh-remote-backend] ${msg}\n`);
   };
-  const persistenceHost = persistenceAccessFromContext(ctx);
-  const questionHost = questionAccessFromContext(ctx);
-  const catalogHost = catalogAccessFromContext(ctx);
-  const compactionHost = compactionAccessFromContext(ctx);
-  const attachmentsHost = attachmentsAccessFromContext(ctx);
+  const host = hostAccessFromContext(ctx);
   void runServe({
-    sessions: sessionAccessFromContext(ctx),
-    agents: agentAccessFromContext(ctx),
-    approvalHost: approvalAccessFromContext(ctx),
-    ...(persistenceHost !== undefined ? { persistenceHost } : {}),
-    ...(questionHost !== undefined ? { questionHost } : {}),
-    ...(catalogHost !== undefined ? { catalogHost } : {}),
-    ...(compactionHost !== undefined ? { compactionHost } : {}),
-    ...(attachmentsHost !== undefined ? { attachmentsHost } : {}),
+    sessions: host.sessions,
+    agents: host.agents,
+    approvalHost: host.approvalHost,
+    ...(host.persistenceHost !== undefined ? { persistenceHost: host.persistenceHost } : {}),
+    ...(host.questionHost !== undefined ? { questionHost: host.questionHost } : {}),
+    ...(host.catalogHost !== undefined ? { catalogHost: host.catalogHost } : {}),
+    ...(host.compactionHost !== undefined ? { compactionHost: host.compactionHost } : {}),
+    ...(host.attachmentsHost !== undefined ? { attachmentsHost: host.attachmentsHost } : {}),
     diag,
   }).catch((err: unknown) => {
     diag(`serve failed: ${err instanceof Error ? err.message : String(err)}`);

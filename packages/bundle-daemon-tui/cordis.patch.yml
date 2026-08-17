@@ -25,8 +25,10 @@
 # The local execution world (fs-sandbox, subprocess, sandboxes) is left
 # untouched: in daemon mode execution happens inside the remote host, never
 # rerouted from the local process. Rows that merely INJECT sessions/agents
-# (session-title, agent-loop, session-query, subagent, …) also stay — the
-# proxy re-provides the same service keys, remote-backed.
+# (session-title, session-query, subagent, …) also stay — the proxy
+# re-provides the same service keys, remote-backed. One exception:
+# `agent-loop` does not merely inject — it registers itself as THE agent
+# factory on ctx.agents, so it must be disabled (see below).
 
 # dsh-base row `session` (@deepseek-ai/dsh-session): the local ctx.sessions
 # store. Disabled; remote-proxy takes over the `sessions` service key with a
@@ -48,6 +50,15 @@
 # on the remote host — nothing session-shaped is written to the local disk.
 - id: session-persistence-jsonl
   name: '@deepseek-ai/dsh-session-persistence-jsonl'
+  disabled: true
+
+# dsh-base row `agent-loop` (@deepseek-ai/dsh-agent-loop): the LOCAL agent
+# loop. It registers itself as THE agent factory on ctx.agents
+# (`ctx.agents.setFactory(this)`), which conflicts with remote-proxy's
+# RemoteAgentFactory ("an agent factory is already registered"). In daemon
+# mode the loop runs inside the remote host, so the local row is disabled.
+- id: agent-loop
+  name: '@deepseek-ai/dsh-agent-loop'
   disabled: true
 
 - insert:
@@ -73,8 +84,12 @@
     # ctx.remoteSessions: session list/attach/prompt/cancel/fork over the
     # daemon protocol, with exclusive-write leases and seq-cursor resume.
     # `!!js` evaluates against the entry's cordis context.
+    # DaemonRemoteSessions reads ctx.remoteHub in its constructor; the loader
+    # only grants service access to entries declaring the inject list, so
+    # remoteHub must be injected here.
     - id: remote-daemon
       name: '@dsh-remote/remote-daemon'
+      inject: [remoteHub]
       config:
         resolveToken: !!js "async (ref) => { const token = process.env[ref]; if (!token) throw new Error(`pairing token env var not set: ${ref}`); return token; }"
 

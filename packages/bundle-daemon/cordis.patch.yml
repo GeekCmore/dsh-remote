@@ -31,8 +31,12 @@
     # ctx.remoteSessions: session list/attach/prompt/cancel/fork over the
     # daemon protocol, with exclusive-write leases and seq-cursor resume.
     # `!!js` evaluates against the entry's cordis context.
+    # DaemonRemoteSessions reads ctx.remoteHub in its constructor; the loader
+    # only grants service access to entries declaring the inject list, so
+    # remoteHub must be injected here.
     - id: remote-daemon
       name: '@dsh-remote/remote-daemon'
+      inject: [remoteHub]
       config:
         resolveToken: !!js "async (ref) => { const token = process.env[ref]; if (!token) throw new Error(`pairing token env var not set: ${ref}`); return token; }"
 

@@ -45,7 +45,7 @@ describe('session.compact', () => {
     const { world } = await attachedWorld({ compaction });
     world.approvalHost.raise({ sessionId: 's1', kind: 'exec', summary: 'x' }).catch(() => {});
     await tick();
-    expect(world.broker.list()[0]!.status).toBe('waiting-approval');
+    expect((await world.broker.list())[0]!.status).toBe('waiting-approval');
     await expectRemoteError(
       world.client.call(Methods.SessionCompact, { sessionId: 's1' }),
       'REMOTE_ABORTED',

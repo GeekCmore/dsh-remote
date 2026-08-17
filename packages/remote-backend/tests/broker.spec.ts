@@ -19,7 +19,7 @@ function makeBroker() {
 }
 
 describe('SessionBroker session.list', () => {
-  it('lists live and cold sessions with status/attached/controller', () => {
+  it('lists live and cold sessions with status/attached/controller', async () => {
     const { sessions, agents, broker } = makeBroker();
     sessions.add('s1');
     sessions.add('s2');
@@ -29,7 +29,7 @@ describe('SessionBroker session.list', () => {
     broker.connect(a.conn);
     broker.attach('a', { sessionId: 's1', mode: 'write' });
 
-    const list = broker.list();
+    const list = await broker.list();
     const s1 = list.find((s) => s.sessionId === 's1')!;
     expect(s1).toMatchObject({ status: 'idle', attachedClients: 1, controller: 'a', lastSeq: -1 });
     expect(list.find((s) => s.sessionId === 's2')!.status).toBe('running');

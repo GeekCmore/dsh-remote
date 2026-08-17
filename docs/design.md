@@ -72,6 +72,12 @@ The daemon channel is an SSH **exec process** running
 vocabulary) rides its stdio. No TCP listener — the attack surface is SSH
 itself.
 
+The production form is `dsh-remote-backend serve --profile <name>`: the bin
+boots the named dsh profile in-process (`@deepseek-ai/dsh-app-boot`), and
+the profile's `@dsh-remote/backend` plugin row takes over stdio against the
+real host services. Bare `serve` keeps a standalone empty host behind the
+protocol — handshake/plumbing smoke only.
+
 Protocol v2 (additive on top of v1): `session.history` (seq-paginated,
 never resumes an agent), `session.fork {atSeq}` (the only time-travel
 semantic — upstream logs are append-only, there is no truncate API),

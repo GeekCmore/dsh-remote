@@ -5,12 +5,29 @@ attaches to sessions running inside a full headless dsh on a remote Linux
 host — tmux-style attach/detach, seq-cursor resume after reconnect, and an
 exclusive-write control lease per session (read concurrency unlimited).
 
-The remote half is `@dsh-remote/remote-backend`, deployed once per target
-with `dsh-remote-backend init` (installs the backend plugin into the remote
-headless profile and issues the 256-bit pairing token). The daemon channel
-runs as an SSH exec process (`dsh-remote-backend serve`) speaking newline
-JSON-RPC on stdio with an HMAC challenge-response handshake — no TCP port is
-opened on the remote host.
+The remote half is `@dsh-remote/backend`. Deploying it is two steps:
+(a) lay down a remote dsh profile whose tree contains `@deepseek-ai/dsh-base`
+plus the backend row below (install the profile's dependencies into
+`$DSH_HOME/profiles/<name>/`):
+
+```yaml
+- insert:
+    - id: dsh-remote-backend
+      name: '@dsh-remote/backend'
+      inject: [sessions, agents]
+```
+
+The `inject` list is contractual: `sessions` and `agents` are required and
+gate activation, while the optional services (sessionPersistence,
+userQuestions, llm, skills, agentPresets, compaction, attachments) are probed
+at runtime — declaring one of them in `inject` deadlocks activation if the
+profile never provides it. (b) run `dsh-remote-backend init` there, which
+only writes the 256-bit pairing token (printed once; config dir
+`$DSH_REMOTE_CONFIG_DIR`, default `~/.config/dsh-remote`). The daemon
+channel then runs as an SSH exec process
+(`dsh-remote-backend serve --profile <name>`, which boots that profile
+in-process) speaking newline JSON-RPC on stdio with an HMAC
+challenge-response handshake — no TCP port is opened on the remote host.
 
 ## What the patch does
 
@@ -46,8 +63,12 @@ Reference the bundle from a profile manifest:
 
 Then, per target:
 
-1. On the remote host: `dsh-remote-backend init` — prints the pairing token
-   once.
+1. On the remote host: lay down a dsh profile (say `daemon`) with
+   `@deepseek-ai/dsh-base` in `dsh.profile.bundles` and the backend row shown
+   above (`inject: [sessions, agents]`) in its `cordis.patch.yml`, install
+   its dependencies, then run `dsh-remote-backend init` — prints the pairing
+   token once. The exec command on that host is
+   `dsh-remote-backend serve --profile daemon`.
 2. Locally: export the token under the ref name (default
    `DSH_REMOTE_TOKEN`) and point the target at the host by restating the
    **whole** `remote-ssh` row config in the profile's `cordis.patch.yml`:

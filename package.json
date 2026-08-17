@@ -10,7 +10,8 @@
     "test": "pnpm -r test",
     "typecheck": "pnpm -r typecheck",
     "verify:contract": "node scripts/verify-contract.mjs",
-    "smoke:dsh-host": "bash e2e/dsh-host/run-smoke.sh"
+    "smoke:dsh-host": "bash e2e/dsh-host/run-smoke.sh",
+    "smoke:dsh-daemon": "bash e2e/dsh-daemon/run-smoke.sh"
   },
   "devDependencies": {
     "@types/node": "^24.0.0",

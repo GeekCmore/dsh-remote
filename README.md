@@ -21,12 +21,12 @@ Two modes, both transparent to dsh frontends (CLI/TUI/GUI/SDK):
 | `@dsh-remote/remote-ssh` | frontend | ssh2-backed `ctx.remoteHub` provider: `SshRemoteHub` + `SshTransport` |
 | `@dsh-remote/fs-ssh` | frontend | `ctx.fs` provider over SFTP + exec wrapper (live mode) |
 | `@dsh-remote/subprocess-ssh` | frontend | `ctx.subprocess` provider over exec wrapper + PTY (live mode, M2) |
-| `@dsh-remote/remote-sessions` | frontend | `ctx.remoteSessions` service definition: attach/detach vocabulary (re-exports the client handle types) |
+| `@dsh-remote/sessions` | frontend | `ctx.remoteSessions` service definition: attach/detach vocabulary (re-exports the client handle types) |
 | `@dsh-remote/client` | frontend | Cordis-free daemon client: pairing handshake, reconnect + seq-cursor resume, write leases, capability negotiation, history/fork-at-seq/compact/prompt-blocks, approval & question bridging API |
 | `@dsh-remote/remote-daemon` | frontend | Thin cordis adapter exposing the client as `ctx.remoteSessions` |
 | `@dsh-remote/proxy` | frontend | Remote-backed implementations of the official session seams (`sessions`/`agents`/`sessionPersistence`) — daemon-mode transparency for seam-compliant in-process frontends |
 | `@dsh-remote/remote-frontend` | frontend | Workspace/session management, monitoring, file interop services |
-| `@dsh-remote/remote-backend` | backend | Remote agent plugin: session broker, approval + question bridges, control lease, monitor, transfer endpoints, history/compact/catalog endpoints |
+| `@dsh-remote/backend` | backend | Remote agent plugin: session broker, approval + question bridges, control lease, monitor, transfer endpoints, history/compact/catalog endpoints |
 | `@dsh-remote/bundle-live` | profile | dsh profile bundle: live mode — disables the local fs/subprocess backends, mounts the SSH providers |
 | `@dsh-remote/bundle-daemon` | profile | dsh profile bundle: daemon-mode frontend — mounts hub + daemon sessions + transfer/monitor |
 | `@dsh-remote/bundle-daemon-tui` | profile | dsh profile bundle: daemon mode for seam-compliant TUIs — replaces the local session/agent/persistence rows with the remote-backed proxy |
@@ -42,8 +42,21 @@ Both modes expect the remote host to be **Linux** with:
   inspection and session teardown).
 
 Daemon mode additionally requires Node + a headless dsh profile with
-`@dsh-remote/remote-backend` installed (`dsh-remote-backend init` sets this up
-and issues the pairing token).
+`@dsh-remote/backend` installed. The backend row must declare exactly the
+required services — optional ones (sessionPersistence, userQuestions, llm,
+skills, agentPresets, compaction, attachments) are probed at runtime, and
+injecting a service the profile never provides deadlocks activation:
+
+```yaml
+- insert:
+    - id: dsh-remote-backend
+      name: '@dsh-remote/backend'
+      inject: [sessions, agents]
+```
+
+`dsh-remote-backend init` issues the pairing token (config dir
+`$DSH_REMOTE_CONFIG_DIR`, default `~/.config/dsh-remote`); the daemon channel
+runs as an SSH exec process: `dsh-remote-backend serve --profile <name>`.
 
 ## Known limitations
 
@@ -84,10 +97,10 @@ eval "$(integration/run-sshd.sh start)"   # exports DSH_TEST_SSH_* vars
 integration/run-sshd.sh stop
 ```
 
-End-to-end smoke against a real `dsh` host (boots the actual dsh CLI on a
-scratch `DSH_HOME`, swaps the fs/subprocess provider rows for ours via a
-`--patch` overlay, and exercises them against the sshd container):
+End-to-end smokes against a real `dsh` host (pack the packages, boot the
+actual dsh CLI on a scratch `DSH_HOME`, exercise the seams end to end):
 
 ```sh
-pnpm smoke:dsh-host
+pnpm smoke:dsh-host      # live mode vs the sshd container: --patch overlay + bundle scenarios
+pnpm smoke:dsh-daemon    # daemon mode: real headless dsh in the daemon-host container, bundle-daemon-tui seam swap
 ```
