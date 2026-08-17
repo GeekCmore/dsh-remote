@@ -17,6 +17,7 @@ import {
   type RemoteTarget,
   type RemoteTargetInfo,
   type RemoteTransport,
+  type SshAuth,
   type SshConnectHooks,
 } from '@dsh-remote/remote';
 import { SshTransport } from './ssh-transport.js';
@@ -131,12 +132,12 @@ export class SshRemoteHub extends RemoteHub {
    * is created on the remote host; failure there fails the connection and
    * cleans up the transport.
    */
-  override connect(id: string): Promise<RemoteTransport> {
+  override connect(id: string, authOverride?: SshAuth): Promise<RemoteTransport> {
     const entry = this.entries.get(id);
     if (!entry) throw new Error(`unknown remote target: ${id}`);
     if (entry.status === 'connected' && entry.transport) return Promise.resolve(entry.transport);
     if (entry.connecting) return entry.connecting;
-    const connecting = this.establish(entry);
+    const connecting = this.establish(entry, authOverride);
     entry.connecting = connecting;
     return connecting;
   }
@@ -166,13 +167,16 @@ export class SshRemoteHub extends RemoteHub {
   }
 
   /** Run one connection attempt for an entry. */
-  private async establish(entry: TargetEntry): Promise<SshTransport> {
+  private async establish(entry: TargetEntry, authOverride?: SshAuth): Promise<SshTransport> {
     entry.status = 'connecting';
     let transport: SshTransport | undefined;
     try {
       const hooks: SshConnectHooks = {};
       if (this.config.hostVerifier) hooks.hostVerifier = this.config.hostVerifier;
-      transport = await SshTransport.connect(entry.config.ssh, hooks);
+      transport = await SshTransport.connect({
+        ...entry.config.ssh,
+        auth: authOverride ?? entry.config.ssh.auth,
+      }, hooks);
       const root = await this.setupRuntimeRoot(transport, entry.id);
       entry.transport = transport;
       entry.runtimeRoot = root;
