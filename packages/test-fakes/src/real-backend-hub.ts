@@ -1,13 +1,13 @@
 /**
- * COPIED from `packages/remote-daemon/tests/e2e/real-backend-hub.ts`
- * (test-private; the BackendRig pattern reused for the proxy e2e).
- *
  * E2E wiring: a `ctx.remoteHub` fake whose `transport.exec(backendCommand)`
  * returns an {@link ExecProcess} whose stdin/stdout are BytePipes connected to
  * a REAL `BackendServer` (remote-backend serve logic: real JSON-RPC framing,
  * real HMAC handshake, real SessionBroker/ApprovalBridge/MonitorCollector over
- * the in-memory host fakes). Same shape as `tests/fake-hub.ts`, but the
+ * the in-memory host fakes). Same shape as `fake-hub.ts`, but the
  * spawned backend is the production implementation, not a re-implementation.
+ *
+ * Moved from `packages/remote-daemon/tests/e2e/real-backend-hub.ts`;
+ * remote-proxy carried a byte-identical copy (modulo the header comment).
  *
  * One rig = one remote host: every exec spawn shares the same SessionBroker,
  * so reconnects and second clients see the same sessions and leases.
@@ -15,14 +15,11 @@
 import { Context } from '@deepseek-ai/cordis';
 import {
   RemoteHub,
-  TransportError,
   type ConnectionStatus,
-  type ExecOptions,
   type ExecProcess,
   type RemoteTarget,
   type RemoteTargetInfo,
   type RemoteTransport,
-  type SftpLike,
 } from '@dsh-remote/remote';
 import {
   ApprovalBridge,
@@ -31,7 +28,8 @@ import {
   QuestionBridge,
   SessionBroker,
 } from '@dsh-remote/backend';
-import { BytePipe } from '../byte-pipe.js';
+import { BytePipe } from '@dsh-remote/test-utils';
+import { FakeBackendTransport } from './backend-transport.js';
 import {
   FakeAgentHost,
   FakeApprovalHost,
@@ -42,7 +40,7 @@ import {
   FakeQuestionHost,
   FakeSessionHost,
   fakeMonitorSources,
-} from './fakes.js';
+} from './host-fakes.js';
 
 export const E2E_TOKEN = 'e2e-pairing-token-0123456789abcdef';
 
@@ -53,7 +51,7 @@ export const E2E_TOKEN = 'e2e-pairing-token-0123456789abcdef';
  */
 export class BackendRig {
   readonly sessions = new FakeSessionHost();
-  readonly agents = new FakeAgentHost();
+  readonly agents = new FakeAgentHost(this.sessions);
   readonly approvalHost = new FakeApprovalHost();
   readonly persistence = new FakePersistence();
   readonly questionHost = new FakeQuestionHost();
@@ -147,46 +145,6 @@ export class BackendRig {
   }
 }
 
-/** Execs only the backend command; anything else exits 127. */
-class RigTransport implements RemoteTransport {
-  readonly execLog: string[] = [];
-
-  constructor(
-    private readonly rig: BackendRig,
-    private readonly backendCommand: string,
-  ) {}
-
-  exec(command: string, _opts?: ExecOptions): Promise<ExecProcess> {
-    this.execLog.push(command);
-    if (command === this.backendCommand) return Promise.resolve(this.rig.spawn());
-    const stdout = new BytePipe();
-    stdout.end();
-    const stderr = new BytePipe();
-    stderr.push(new TextEncoder().encode(`fake: command not found: ${command}\n`));
-    stderr.end();
-    return Promise.resolve({
-      stdout,
-      stderr,
-      write: () => {},
-      endStdin: () => {},
-      done: Promise.resolve({ code: 127 }),
-      kill: async () => {},
-    });
-  }
-
-  sftp(): Promise<SftpLike> {
-    return Promise.reject(new TransportError('fake: no sftp', 'IO_ERROR'));
-  }
-
-  probeLoginEnv(_vars: string[]): Promise<Record<string, string>> {
-    return Promise.resolve({});
-  }
-
-  close(): Promise<void> {
-    return Promise.resolve();
-  }
-}
-
 /** `ctx.remoteHub` fake handing out rig-connected transports per target. */
 export class RigRemoteHub extends RemoteHub {
   /** How many times `connect()` was called (initial connect + reconnects). */
@@ -196,6 +154,11 @@ export class RigRemoteHub extends RemoteHub {
 
   constructor(ctx: Context) {
     super(ctx);
+  }
+
+  /** RigRemoteHub targets are registered together with their rig via addRig. */
+  override addTarget(_config: RemoteTarget): string {
+    throw new Error('RigRemoteHub: register targets with addRig (each target needs a BackendRig)');
   }
 
   /** Register a target backed by `rig`; returns the target id. */
@@ -246,7 +209,10 @@ export class RigRemoteHub extends RemoteHub {
     const entry = this.rigs.get(id);
     if (!entry) return Promise.reject(new Error(`fake hub: unknown target: ${id}`));
     this.connectCalls++;
-    return Promise.resolve(new RigTransport(entry.rig, this.backendCommand));
+    const rig = entry.rig;
+    return Promise.resolve(
+      new FakeBackendTransport((): ExecProcess => rig.spawn(), this.backendCommand),
+    );
   }
 
   override disconnect(_id: string): Promise<void> {

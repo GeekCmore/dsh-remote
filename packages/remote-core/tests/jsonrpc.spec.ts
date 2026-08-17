@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { JsonRpcPeer, RemoteError, encodeLine } from '../src/index.js';
-import { BytePipe, decodeLines, pipePair, tick } from './util.js';
+import { BytePipe, decodeLines, pipePair, tick } from '@dsh-remote/test-utils';
 
 function makePeers() {
   const { aIn, bIn } = pipePair();

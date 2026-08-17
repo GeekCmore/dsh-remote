@@ -10,9 +10,8 @@ import type { ApprovalRequestParams, ControlChangeReason, QuestionRequestParams 
 import type { RemoteAgentHandle, RemoteAgentStatus } from '@dsh-remote/sessions';
 import type { SessionEvent } from '@dsh-remote/seams';
 import { DaemonRemoteSessions } from '../src/index.js';
-import { FakeBackendBroker } from './fake-backend.js';
-import { FakeRemoteHub } from './fake-hub.js';
-import { tick } from './byte-pipe.js';
+import { FakeBackendBroker, FakeRemoteHub } from '@dsh-remote/test-fakes';
+import { tick } from '@dsh-remote/test-utils';
 
 const TOKEN = 'pairing-token';
 const REF = 'tok-ref';

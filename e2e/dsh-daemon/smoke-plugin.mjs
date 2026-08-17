@@ -19,7 +19,19 @@
  *      history through a read-mode attach, and forks it at a seq boundary
  *      via the handle's fork API — asserting the forked child shows up in
  *      the remote (cold) listing,
- *   5. prints one DSH_REMOTE_DAEMON_SMOKE OK line on stderr and exits 0.
+ *   5. OPTIONAL LLM leg (gated on DSH_SMOKE_LLM_KEY, falling back to
+ *      DEEPSEEK_API_KEY; run-smoke.sh injects the same key into the
+ *      CONTAINER's credential store, because in daemon mode the model call
+ *      happens on the remote host): registers a local auto-approving
+ *      `approval/request` answerer, prompts the remote agent for a bash
+ *      command the workspace-write sandbox must deny (a /var/tmp write —
+ *      /tmp itself is inside the workspace-write allow-list) so the
+ *      retry escalates through the approval bridge, and asserts the bridged
+ *      approval landed locally and the final assistant message echoes the
+ *      marker — proving the full prompt → approval → answer → completion
+ *      round trip. Without a key it prints one SKIP line and continues.
+ *   6. prints one DSH_REMOTE_DAEMON_SMOKE OK line on stderr (with `llm=ok`
+ *      when the LLM leg ran) and exits 0.
  *
  * Any failure prints DSH_REMOTE_DAEMON_SMOKE FAIL plus the stack and exits 1.
  * The SSH target and pairing token come from smoke.patch.yml
@@ -35,6 +47,43 @@ const TARGET_ID = 'default';
 function fail(error) {
   console.error(MARK_FAIL, error?.stack ?? String(error));
   process.exit(1);
+}
+
+/**
+ * Compact digest of a remote history page for the LLM-leg timeout error:
+ * event-type histogram, every tool call/result by name, and a snippet of the
+ * last assistant text — enough to tell "model never called the tool" apart
+ * from "tool ran but the bridge/echo stalled" without dumping raw chunks.
+ */
+function summarizeRemote(entries) {
+  const counts = new Map();
+  const tools = [];
+  let lastText = '';
+  const textOf = (data) => {
+    // assistant/chunk: {text}; assistant/message + tool/result:
+    // {message: {content: blocks}} (tool/result nests one tool-result block).
+    if (typeof data?.text === 'string') return data.text;
+    const blocks = data?.message?.content;
+    if (!Array.isArray(blocks)) return '';
+    return blocks
+      .flatMap((b) => (Array.isArray(b?.content) ? b.content : [b]))
+      .map((b) => (typeof b?.text === 'string' ? b.text : ''))
+      .join('');
+  };
+  for (const { seq, event } of entries) {
+    counts.set(event.type, (counts.get(event.type) ?? 0) + 1);
+    if (event.type === 'tool/call') {
+      tools.push(`${seq}:call:${event.data?.name}:${JSON.stringify(event.data?.arguments ?? '').slice(0, 200)}`);
+    } else if (event.type === 'tool/result') {
+      tools.push(`${seq}:result:${textOf(event.data).slice(0, 300)}`);
+    }
+    if (event.type === 'assistant/chunk' || event.type === 'assistant/message') {
+      const text = textOf(event.data);
+      if (text) lastText = text.slice(-300);
+    }
+  }
+  const histogram = [...counts.entries()].map(([type, n]) => `${type}×${n}`).join(',');
+  return `${histogram} | tools=[${tools.join(' | ')}] | lastAssistant=${JSON.stringify(lastText)}`;
 }
 
 export default function dshRemoteDaemonSmoke(ctx) {
@@ -109,8 +158,13 @@ export default function dshRemoteDaemonSmoke(ctx) {
       throw new Error(`remote session ${sessionId} is ${summary.state}, expected active`);
     }
 
-    // Cold-style reads without resuming: read-mode attach (unlimited readers;
-    // the proxy's mirror holds the write lease) → seq-paginated history.
+    // Cold-style reads without resuming: seq-paginated history over the
+    // remoteSessions handle. NOTE: attach() is idempotent per (target,
+    // session), so this "reader" IS the proxy mirror's write handle — it must
+    // NOT be detached here (detach is terminal for the shared handle: it would
+    // kill the mirror's event tap, the status feed, and the approval-bridge
+    // wiring the LLM leg below depends on). The write lease the handle holds
+    // is also what makes fork() legal on the daemon side.
     const reader = await ctx.remoteSessions.attach(TARGET_ID, sessionId, { mode: 'read' });
     const page = await reader.history({ maxMessages: 50 });
 
@@ -119,7 +173,6 @@ export default function dshRemoteDaemonSmoke(ctx) {
     // log, fork at the head instead.
     const headSeq = page.entries.length > 0 ? page.entries[page.entries.length - 1].seq : undefined;
     const forked = await reader.fork(headSeq !== undefined ? { atSeq: headSeq } : {});
-    await reader.detach();
 
     // The forked child has no live runtime yet — it must surface in the
     // remote list via the cold-session index.
@@ -128,13 +181,110 @@ export default function dshRemoteDaemonSmoke(ctx) {
       throw new Error(`remote (cold) list does not contain the forked session ${forked.sessionId}`);
     }
 
-    // --- 5. optional LLM round trip --------------------------------------------
-    if (process.env.DSH_SMOKE_LLM_KEY) {
-      // TODO(Wave 2): real LLM round trip + approval bridge exercise —
-      // prompt the remote agent (created.agent.followup / handle.prompt),
-      // assert assistant/message mirrors back through the local bus, and
-      // register a local approval answerer to prove the remote
-      // approval/request bridge lands on ctx.approval.
+    // --- 5. optional LLM round trip + approval bridge -------------------------
+    // Gated on a model key (DSH_SMOKE_LLM_KEY wins, DEEPSEEK_API_KEY is the
+    // fallback); the key itself is only a presence signal here — the remote
+    // host got it through its own credential store (see run-smoke.sh).
+    let llmLeg = '';
+    if (process.env.DSH_SMOKE_LLM_KEY ?? process.env.DEEPSEEK_API_KEY) {
+      const MARKER_TEXT = 'dsh-remote-llm-ok';
+      // The local answerer the proxy's bridge is meant to reach: a remote
+      // approval/request is dispatched onto the LOCAL approval waterfall; an
+      // 'allowed-once' here maps to a wire 'approve' that unblocks the
+      // remote turn.
+      const approvals = [];
+      ctx.on('approval/request', async (req) => {
+        approvals.push({ toolName: req.toolName, reason: req.reason });
+        return 'allowed-once';
+      });
+
+      // A plain in-workspace command never asks approval in the default
+      // workspace-write mode, so the command MUST cross the sandbox fence.
+      // NOTE: /tmp is NOT a fence crossing — upstream workspace-write allows
+      // the workspace root AND /tmp + os.tmpdir(). /var/tmp is outside the
+      // allow-list (so the confined run is denied) yet writable by the remote
+      // user once the approved escalation re-runs unconfined — the denial
+      // plus the tool's standing instruction makes the model retry once with
+      // sandbox_permissions + justification, and that retry is the approval
+      // the bridge relays.
+      //
+      // Prompt through the client handle directly instead of
+      // created.agent.followup(): attach() is idempotent per (target,
+      // session) and returns the mirror's own write handle — the exact
+      // handle followup() would route to — and the AWAITED prompt()
+      // surfaces remote rejection (followup is fire-and-forget and would
+      // swallow it into the plugin logger).
+      //
+      // The prompt is deliberately imperative: reasoning models happily
+      // narrate a plan for minutes without ever emitting the tool call, so
+      // order an IMMEDIATE call, by tool name, with no explanation.
+      const PROMPT_TEXT =
+        `Immediately call the bash tool (tool name: "bash") to run exactly this command, ` +
+        `with no explanation, plan, or preamble — your first action must be the tool call:\n` +
+        `echo ${MARKER_TEXT} | tee /var/tmp/dsh-remote-llm-smoke.txt\n` +
+        'If the sandbox denies the write, retry the exact same command once ' +
+        'with sandbox_permissions plus a one-sentence justification. Once the ' +
+        `command has run, reply with exactly its stdout and nothing else.`;
+      const writer = await ctx.remoteSessions.attach(TARGET_ID, sessionId, { mode: 'write' });
+      // Wire-level tap, independent of the mirror: distinguishes "the daemon
+      // never delivered seq N to this handle" from "the mirror received seq N
+      // but failed to append it" when the two diverge on timeout.
+      const wireSeqs = [];
+      const offWire = writer.onEvent((ev) => wireSeqs.push(ev.seq));
+      await writer.prompt(PROMPT_TEXT);
+
+      const llmDeadline = Date.now() + 300_000;
+      let echoed = false;
+      let lastBeat = 0;
+      for (;;) {
+        for (const ev of created.agent.session.events) {
+          if (ev.type === 'assistant/message' && JSON.stringify(ev.data).includes(MARKER_TEXT)) {
+            echoed = true;
+          }
+        }
+        if (echoed && approvals.length > 0) break;
+        if (Date.now() > llmDeadline) {
+          // Distinguish "prompt never landed remotely" from "mirror stalled":
+          // read the REMOTE log through the same shared handle before failing.
+          // Include a data-level tail (last assistant text / tool events), not
+          // just types — "model rambled without a tool call" vs "tool call
+          // denied, no escalation" look identical at the type level.
+          let remoteDigest = 'unreadable';
+          try {
+            const probe = await ctx.remoteSessions.attach(TARGET_ID, sessionId, { mode: 'read' });
+            const remotePage = await probe.history({ maxMessages: 400 });
+            remoteDigest = summarizeRemote(remotePage.entries);
+          } catch (probeErr) {
+            remoteDigest = `probe failed: ${String(probeErr)}`;
+          }
+          throw new Error(
+            `LLM round trip timed out after 300s: echoed=${echoed}`
+              + ` approvals=${JSON.stringify(approvals)}`
+              + ` localSeq=${created.agent.session.seq} wireSeqs=${wireSeqs.length}`
+              + ` wireHead=${wireSeqs.length > 0 ? wireSeqs[wireSeqs.length - 1] : 'none'}`
+              + ` localEvents=${created.agent.session.events.map((e) => e.type).join(',')}`
+              + ` remote=${remoteDigest}`,
+          );
+        }
+        if (Date.now() - lastBeat > 15_000) {
+          lastBeat = Date.now();
+          const remoteState = await ctx.remoteSessions
+            .list(TARGET_ID)
+            .then((list) => list.find((s) => s.sessionId === sessionId)?.state ?? 'absent')
+            .catch((err) => `list failed: ${String(err)}`);
+          console.error(
+            `[smoke] llm-wait: localStatus=${created.agent.status}`
+              + ` localEvents=${created.agent.session.events.length} remoteState=${remoteState}`,
+          );
+        }
+        await new Promise((resolve) => setTimeout(resolve, 1_000));
+      }
+      if (approvals[0].toolName !== 'bash') {
+        throw new Error(`bridged approval was for ${String(approvals[0].toolName)}, expected bash`);
+      }
+      llmLeg = ' llm=ok';
+    } else {
+      console.error('DSH_REMOTE_DAEMON_SMOKE SKIP llm (no DSH_SMOKE_LLM_KEY / DEEPSEEK_API_KEY)');
     }
 
     await created.dispose();
@@ -142,7 +292,7 @@ export default function dshRemoteDaemonSmoke(ctx) {
     console.error(
       `${MARK_OK} sessions=${sessionsName} agents=${agentsName} persistence=${persistenceName}`
         + ` remoteSessions=${remoteSessionsName} sessionsBefore=${before}`
-        + ` session=${sessionId} historyEntries=${page.entries.length} fork=${forked.sessionId}`,
+        + ` session=${sessionId} historyEntries=${page.entries.length} fork=${forked.sessionId}${llmLeg}`,
     );
     process.exit(0);
   })().catch(fail);

@@ -1,6 +1,12 @@
 /**
  * Fully in-memory fakes of the host structural interfaces (host.ts) plus
  * wiring helpers that run the real BackendServer over a BytePipe pair.
+ *
+ * The e2e harnesses of remote-daemon/remote-proxy import a shared SUBSET of
+ * these host fakes from `@dsh-remote/test-fakes` (`host-fakes.ts` there);
+ * this file stays the canonical full version because remote-backend's tests
+ * cannot depend on test-fakes without closing a workspace dependency cycle
+ * (test-fakes imports `@dsh-remote/backend`). Keep the shared classes in sync.
  */
 import {
   ChannelMux,
@@ -42,7 +48,7 @@ import type { MonitorSources } from '../src/monitor.js';
 import { MonitorCollector } from '../src/monitor.js';
 import { BackendServer, type ServeAuthOptions, fanout } from '../src/serve.js';
 import { TransferManager } from '../src/transfer.js';
-import { pipePair } from './util.js';
+import { pipePair } from '@dsh-remote/test-utils';
 
 export class FakeSession implements HostSession {
   readonly header: { createdAt: number; cwd?: string };
@@ -72,7 +78,12 @@ export class FakeSessionHost implements SessionHostAccess {
     return session;
   }
 
-  /** `session.create` backing: mint an id and register a fresh session. */
+  /**
+   * Mint-and-register a fresh session. Shared id-minter for
+   * {@link FakeAgentHost.create} (upstream mints session and agent under one
+   * id); the broker no longer calls this directly — wire `session.create`
+   * routes through the agent host.
+   */
   create(options: { cwd?: string; title?: string } = {}): FakeSession {
     const id = `created-${this.sessions.size + 1}`;
     const session = new FakeSession(id, {
@@ -161,10 +172,27 @@ export class FakeAgentHost implements AgentHostAccess {
   readonly agents = new Map<string, FakeAgent>();
   #statusListeners: ((agent: HostAgent, status: 'idle' | 'running') => void)[] = [];
 
+  /**
+   * @param sessionHost - link to the companion FakeSessionHost so
+   *   {@link create} can mint the session side too (upstream's contract: one
+   *   `agents.create` publishes BOTH). Optional; without it create still
+   *   mints the agent, with a standalone id.
+   */
+  constructor(private readonly sessionHost?: FakeSessionHost) {}
+
   add(id: string): FakeAgent {
     const agent = new FakeAgent(id);
     this.agents.set(id, agent);
     return agent;
+  }
+
+  /**
+   * `AgentRegistry.create` backing: mint a fresh session AND its live agent
+   * under one shared id, so the created session is immediately promptable.
+   */
+  async create(options: { cwd?: string; title?: string } = {}): Promise<FakeAgent> {
+    const session = this.sessionHost?.create(options);
+    return this.add(session?.id ?? `created-${this.agents.size + 1}`);
   }
 
   setStatus(id: string, status: 'idle' | 'running'): void {
@@ -373,8 +401,8 @@ export interface TestWorld {
   server: BackendServer;
   client: JsonRpcPeer;
   clientMux: ChannelMux;
-  clientInbound: import('./util.js').BytePipe;
-  serverInbound: import('./util.js').BytePipe;
+  clientInbound: import('@dsh-remote/test-utils').BytePipe;
+  serverInbound: import('@dsh-remote/test-utils').BytePipe;
   fatalCount: () => number;
   diags: string[];
 }
@@ -398,7 +426,7 @@ export interface WorldOptions {
 export function makeWorld(options: WorldOptions = {}): TestWorld {
   const { aIn, bIn } = pipePair();
   const sessions = new FakeSessionHost();
-  const agents = new FakeAgentHost();
+  const agents = new FakeAgentHost(sessions);
   const approvalHost = new FakeApprovalHost();
   const broker = new SessionBroker(sessions, agents, {
     ...(options.persistence !== undefined ? { persistence: options.persistence } : {}),

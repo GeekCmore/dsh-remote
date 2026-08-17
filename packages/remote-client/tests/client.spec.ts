@@ -11,9 +11,8 @@ import type { ApprovalRequestParams, ControlChangeReason, QuestionRequestParams 
 import type { SessionEvent } from '@dsh-remote/seams';
 import { RemoteClient, type RemoteClientHandle } from '../src/index.js';
 import type { RemoteAgentStatus } from '../src/index.js';
-import { FakeBackendBroker } from './fake-backend.js';
-import { FakeTargetConnector } from './fake-connector.js';
-import { tick } from './byte-pipe.js';
+import { FakeBackendBroker, FakeTargetConnector } from '@dsh-remote/test-fakes';
+import { tick } from '@dsh-remote/test-utils';
 
 const TOKEN = 'pairing-token';
 const REF = 'tok-ref';

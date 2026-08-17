@@ -9,7 +9,7 @@ import type { ApprovalRequest, ApprovalOutcome } from '@deepseek-ai/dsh-user-app
 import { Notifications, type ApprovalClosedNotification, type QuestionClosedNotification } from '@dsh-remote/core';
 import { SessionId } from '@deepseek-ai/dsh-session';
 import { toWireAnswers } from '../src/bridges.js';
-import { FakeBackendBroker } from './fake-backend.js';
+import { FakeBackendBroker } from '@dsh-remote/test-fakes';
 import { setupProxy, teardownProxy, TOKEN, type ProxySetup } from './helpers.js';
 
 const cleanups: Array<() => Promise<void>> = [];

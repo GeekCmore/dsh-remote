@@ -33,7 +33,7 @@ import {
 import type { ControlChangeReason, RemoteAgentStatus } from '@dsh-remote/sessions';
 import type { SessionEvent } from '@dsh-remote/seams';
 import { DaemonRemoteSessions, type TargetConnection } from '../../src/index.js';
-import { BackendRig, E2E_TOKEN, RigRemoteHub } from './real-backend-hub.js';
+import { BackendRig, E2E_TOKEN, RigRemoteHub } from '@dsh-remote/test-fakes';
 
 const REF = 'tok-ref';
 

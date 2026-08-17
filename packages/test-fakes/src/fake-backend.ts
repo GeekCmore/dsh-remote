@@ -3,6 +3,10 @@
  * speaking the FULL core protocol vocabulary over a {@link JsonRpcPeer} wired
  * to in-memory byte pipes. No network, no SSH.
  *
+ * Moved verbatim from `packages/remote-client/tests/fake-backend.ts`;
+ * remote-daemon and remote-proxy carried byte-identical copies (modulo header
+ * comments). This is now the single canonical version.
+ *
  * v1 semantics (aligned with the reconciled wire protocol):
  * - `hello`/`hello.proof` handshake with real HMAC verification and
  *   backend-assigned client ids; the challenge advertises this fake's
@@ -18,6 +22,9 @@
  * - prompt requires the write lease and returns `{messageId}`, appends a
  *   `user/message` event and flips the session to `running`;
  * - `session.create` (core `Methods.SessionCreate`) makes a fresh session.
+ *   Matching the real backend, the created session is immediately promptable
+ *   (the daemon mints the live agent together with the session; this fake
+ *   does not model agents, so every session trivially has one).
  *
  * v2 additions:
  * - `session.history` (seq-paginated, `beforeSeq`/`maxMessages`, `hasMore`),
@@ -60,7 +67,7 @@ import {
   type WireSessionEvent,
 } from '@dsh-remote/core';
 import type { ExecProcess } from '@dsh-remote/remote';
-import { BytePipe } from './byte-pipe.js';
+import { BytePipe } from '@dsh-remote/test-utils';
 
 interface FakeSession {
   sessionId: string;

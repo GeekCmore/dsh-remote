@@ -24,6 +24,14 @@
  * the mirror FAILED: appends stop (a gutted mirror is worse than a stuck
  * one) and the condition is logged. Reconnects are safe: the client dedups
  * by seq cursor, so delivery simply continues.
+ *
+ * Local writes are rejected outright: {@link guardMirrorAppend} shadows
+ * `session.append` on every mirrored session so that ONLY the mirror may
+ * write. Without the guard, stock dsh-base reactor plugins corrupt the
+ * mirror — e.g. `dsh-session-title` answers the first mirrored user/message
+ * with a deferred local `session/title` append, which desyncs seq numbering
+ * and freezes the mirror at the next wire event. The remote host owns the
+ * log; titles and friends arrive over the wire.
  */
 import type { Context, Logger } from '@deepseek-ai/cordis';
 import {
@@ -51,6 +59,37 @@ export interface MirrorDeps {
   bridges: InteractionBridges;
 }
 
+/**
+ * Shadow `session.append` on a mirrored session so only the mirror itself
+ * may write (module doc): local reactor plugins holding the session would
+ * otherwise corrupt the seq-exact log. The returned `run` executes `fn` with
+ * the mirror append window open; any append outside it throws.
+ */
+function guardMirrorAppend(session: Session): { run<T>(fn: () => T): T } {
+  const raw = session.append.bind(session) as (...args: unknown[]) => unknown;
+  let inside = false;
+  const guarded = (...args: unknown[]): unknown => {
+    if (!inside) {
+      throw new Error(
+        `session "${session.id as unknown as string}" is a remote mirror: its log is owned by ` +
+          'the remote host; local appends are rejected',
+      );
+    }
+    return raw(...args);
+  };
+  (session as { append: unknown }).append = guarded;
+  return {
+    run: <T>(fn: () => T): T => {
+      inside = true;
+      try {
+        return fn();
+      } finally {
+        inside = false;
+      }
+    },
+  };
+}
+
 export interface MirrorOptions {
   handle: RemoteClientHandle;
   /** Context whose fiber owns this mirror (plugin ctx for pre-mirrors, caller ctx for factory flows). */
@@ -76,6 +115,7 @@ export class SessionMirror {
   failed: Error | undefined;
   private readonly logger: Logger;
   private readonly offEvent: () => void;
+  private readonly guard: { run<T>(fn: () => T): T };
   private readonly scope: Scope;
   private readonly detachSession: () => void;
   private readonly detachAgent: () => void;
@@ -88,6 +128,7 @@ export class SessionMirror {
       session: Session;
       agent: RemoteAgentFacade;
       scope: Scope;
+      guard: { run<T>(fn: () => T): T };
       detachSession: () => void;
       detachAgent: () => void;
       offEvent: () => void;
@@ -97,6 +138,7 @@ export class SessionMirror {
     this.session = parts.session;
     this.agent = parts.agent;
     this.scope = parts.scope;
+    this.guard = parts.guard;
     this.detachSession = parts.detachSession;
     this.detachAgent = parts.detachAgent;
     this.offEvent = parts.offEvent;
@@ -152,14 +194,19 @@ export class SessionMirror {
             ...(opts.meta?.createdAt !== undefined ? { createdAt: opts.meta.createdAt } : {}),
           },
         });
-      for (const wire of history) {
-        if (wire.seq !== session.seq) {
-          throw new Error(
-            `session "${handle.sessionId}": history replay diverged (expected seq ${session.seq}, got ${wire.seq})`,
-          );
+      // Reject local appends from here on (module doc); the mirror writes
+      // through the guard window only.
+      const guard = guardMirrorAppend(session);
+      guard.run(() => {
+        for (const wire of history) {
+          if (wire.seq !== session.seq) {
+            throw new Error(
+              `session "${handle.sessionId}": history replay diverged (expected seq ${session.seq}, got ${wire.seq})`,
+            );
+          }
+          appendMirroredEvent(session, wire);
         }
-        appendMirroredEvent(session, wire);
-      }
+      });
 
       // 4. Facade + scope (key = the facade; parent = the runtime owner).
       const agent = new RemoteAgentFacade({
@@ -207,6 +254,7 @@ export class SessionMirror {
         session,
         agent,
         scope,
+        guard,
         detachSession,
         detachAgent,
         offEvent,
@@ -237,7 +285,7 @@ export class SessionMirror {
       return;
     }
     try {
-      appendMirroredEvent(this.session, wire);
+      this.guard.run(() => appendMirroredEvent(this.session, wire));
     } catch (err) {
       this.fail(
         err instanceof Error

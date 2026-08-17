@@ -51,6 +51,8 @@
     "@dsh-remote/remote": "workspace:*",
     "@dsh-remote/remote-daemon": "workspace:*",
     "@dsh-remote/seams": "workspace:*",
+    "@dsh-remote/test-fakes": "workspace:*",
+    "@dsh-remote/test-utils": "workspace:*",
     "@types/node": "^24.0.0",
     "typescript": "^5.9.0",
     "vitest": "^3.2.0"

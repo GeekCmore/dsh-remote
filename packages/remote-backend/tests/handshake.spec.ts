@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { Methods, RemoteError, computeProof, createHello, type ChallengeMessage } from '@dsh-remote/core';
 import { TEST_TOKEN, expectRemoteError, handshake, makeWorld } from './fakes.js';
-import { sleep } from './util.js';
+import { sleep } from '@dsh-remote/test-utils';
 
 describe('serve handshake', () => {
   it('rejects everything except hello/hello.proof before authentication', async () => {

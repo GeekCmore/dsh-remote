@@ -112,3 +112,9 @@ Known caveats for dsh-TUI-style in-process frontends:
   the prompt by path will miss on the remote fs. The fix belongs on the
   frontend side (send bytes / use the attachments seam); we only document it
   here.
+- Frontends with their own workspace / shell-escape seam (e.g. a
+  `/workspace` picker or a `!command` shell route) keep running those
+  locally unless they route through the generic seams. This repo stays
+  frontend-agnostic on purpose: such a provider is small (register the
+  remote target as a workspace; run the shell escape via `ctx.subprocess`)
+  and belongs to the frontend's own integration layer, not to this repo.

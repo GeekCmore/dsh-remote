@@ -1,8 +1,8 @@
 {
-  "name": "@dsh-remote/core",
+  "name": "@dsh-remote/test-utils",
   "version": "0.0.0",
   "private": true,
-  "description": "Shared protocol vocabulary, channel multiplexing, framing, error codes and pairing-auth primitives for dsh-remote",
+  "description": "Shared test-only plumbing for dsh-remote workspace tests (in-memory byte pipes and async helpers); not published, no workspace dependencies",
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
@@ -15,13 +15,10 @@
   "files": ["dist"],
   "scripts": {
     "build": "tsc -p tsconfig.json",
-    "typecheck": "tsc -p tsconfig.json --noEmit",
-    "test": "vitest run"
+    "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "devDependencies": {
-    "@dsh-remote/test-utils": "workspace:*",
     "@types/node": "^24.0.0",
-    "typescript": "^5.9.0",
-    "vitest": "^3.2.0"
+    "typescript": "^5.9.0"
   }
 }

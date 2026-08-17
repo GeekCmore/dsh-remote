@@ -1,73 +1,30 @@
 /**
  * In-memory fake of `ctx.remoteHub` for remote-daemon tests: `connect()` hands
- * out a {@link FakeTransport} whose `exec(backendCommand)` spawns a
+ * out a {@link FakeBackendTransport} whose `exec(backendCommand)` spawns a
  * {@link FakeBackendBroker} channel; any other command exits 127 so tests
  * notice unexpected exec traffic. No SSH, no network.
+ *
+ * Moved from `packages/remote-daemon/tests/fake-hub.ts`; the per-file
+ * `FakeTransport`/`deadProcess` pair (triplicated across the old
+ * fake-connector/fake-hub/real-backend-hub copies) is now the shared
+ * {@link FakeBackendTransport}.
  */
 import { Context } from '@deepseek-ai/cordis';
 import {
   RemoteHub,
-  TransportError,
   type ConnectionStatus,
-  type ExecOptions,
   type ExecProcess,
   type RemoteTarget,
   type RemoteTargetInfo,
   type RemoteTransport,
-  type SftpLike,
 } from '@dsh-remote/remote';
+import { FakeBackendTransport } from './backend-transport.js';
 import type { FakeBackendBroker } from './fake-backend.js';
-import { BytePipe } from './byte-pipe.js';
 
 interface FakeTargetEntry {
   config: RemoteTarget;
   broker: FakeBackendBroker;
   connected: boolean;
-}
-
-/** An exec process for a command the fake does not implement: exits 127. */
-function deadProcess(command: string): ExecProcess {
-  const stdout = new BytePipe();
-  stdout.end();
-  const stderr = new BytePipe();
-  stderr.push(new TextEncoder().encode(`fake: command not found: ${command}\n`));
-  stderr.end();
-  return {
-    stdout,
-    stderr,
-    write: () => {},
-    endStdin: () => {},
-    done: Promise.resolve({ code: 127 }),
-    kill: async () => {},
-  };
-}
-
-export class FakeTransport implements RemoteTransport {
-  /** Every command line passed to exec, in order. */
-  readonly execLog: string[] = [];
-
-  constructor(
-    private readonly broker: FakeBackendBroker,
-    private readonly backendCommand: string,
-  ) {}
-
-  exec(command: string, _opts?: ExecOptions): Promise<ExecProcess> {
-    this.execLog.push(command);
-    if (command === this.backendCommand) return Promise.resolve(this.broker.spawn());
-    return Promise.resolve(deadProcess(command));
-  }
-
-  sftp(): Promise<SftpLike> {
-    return Promise.reject(new TransportError('fake: no sftp', 'IO_ERROR'));
-  }
-
-  probeLoginEnv(_vars: string[]): Promise<Record<string, string>> {
-    return Promise.resolve({});
-  }
-
-  close(): Promise<void> {
-    return Promise.resolve();
-  }
 }
 
 export class FakeRemoteHub extends RemoteHub {
@@ -148,7 +105,10 @@ export class FakeRemoteHub extends RemoteHub {
     if (!entry?.broker) return Promise.reject(new Error(`fake hub: unknown target: ${id}`));
     this.connectCalls++;
     entry.connected = true;
-    return Promise.resolve(new FakeTransport(entry.broker, this.backendCommand));
+    const broker = entry.broker;
+    return Promise.resolve(
+      new FakeBackendTransport((): ExecProcess => broker.spawn(), this.backendCommand),
+    );
   }
 
   override disconnect(id: string): Promise<void> {

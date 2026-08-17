@@ -177,7 +177,13 @@ directly via `node:fs`, poking private APIs) are out of scope by policy.
   `integration/daemon-host` container, boots it via the
   `dsh-remote-backend serve --profile` self-bootstrap path, and attaches from
   a real local host with the bundle-daemon-tui seam swap, asserting
-  create/history/fork over the wire end to end.
+  create/history/fork over the wire end to end. Given `DSH_SMOKE_LLM_KEY` (or
+  `DEEPSEEK_API_KEY`) it additionally runs the LLM leg — a real prompt round
+  trip whose sandbox-escalation approval is answered by a local answerer
+  through the remote→local approval bridge (`llm=ok`; SKIP line and green
+  without a key). The wire `session.create` mints the remote session AND its
+  live agent together (upstream `ctx.agents.create` contract), so
+  wire-created sessions are promptable.
 - **Live-mode frontend composition (decided + covered).** Live mode composes
   with TUI-family profiles through the standard bundle mechanism:
   `@dsh-remote/bundle-live` applies after `@deepseek-ai/dsh-base`, and
@@ -195,9 +201,11 @@ directly via `node:fs`, poking private APIs) are out of scope by policy.
   the official apiproxy unmodified requires remote-backed versions (or
   explicit local semantics) for the rest. This is a deliberate later
   milestone — no web-specific work is started.
-- **Still open.** Web parity (above); a `tui-workspaces` provider; client
-  SDK documentation; hygiene dedup (e.g. the twin-copy fakes noted in
-  `packages/remote-proxy/tests/fake-backend.ts`).
+- **Still open.** Web parity (above); client SDK documentation.
+- **Frontend neutrality (decided).** Frontend-private seams (e.g. a TUI's
+  workspace/shell-escape registry) are adapted on the frontend's own
+  integration layer against the generic `ctx.remoteHub`/`ctx.subprocess`
+  seams; this repo deliberately ships no frontend-specific adapter packages.
 
 ## Evidence appendix: which seams the surveyed frontends consume
 

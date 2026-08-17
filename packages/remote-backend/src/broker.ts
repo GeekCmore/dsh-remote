@@ -299,20 +299,27 @@ export class SessionBroker {
     this.#dropAttachment(clientId, sessionId);
   }
 
-  /** `session.create`: create a fresh session on the host (when supported). */
-  create(clientId: string, params: SessionCreateParams): SessionCreateResult {
+  /**
+   * `session.create`: mint a fresh session AND its live agent on the host
+   * (when supported). Routed through `AgentHostAccess.create` (upstream
+   * `AgentRegistry.create`), never `SessionStore.create`: a bare session has
+   * no agent and can never be prompted, and upstream offers no way to attach
+   * an agent to an existing session id afterwards. The returned sessionId is
+   * the new agent's id (session and agent share one id upstream).
+   */
+  async create(clientId: string, params: SessionCreateParams): Promise<SessionCreateResult> {
     this.#requireConnection(clientId);
-    if (!this.#sessions.create) {
+    if (!this.#agents.create) {
       throw new RemoteError(
         'REMOTE_PROTOCOL_ERROR',
         'this host does not support session creation',
       );
     }
-    const session = this.#sessions.create({
+    const agent = await this.#agents.create({
       ...(params.cwd !== undefined ? { cwd: params.cwd } : {}),
       ...(params.title !== undefined ? { title: params.title } : {}),
     });
-    return { sessionId: session.id };
+    return { sessionId: agent.id };
   }
 
   /**

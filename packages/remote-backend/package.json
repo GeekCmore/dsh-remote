@@ -37,6 +37,7 @@
   "devDependencies": {
     "@deepseek-ai/cordis": "^4.0.1",
     "@deepseek-ai/dsh-app-boot": "^0.1.0-rc.6",
+    "@dsh-remote/test-utils": "workspace:*",
     "@types/node": "^24.0.0",
     "typescript": "^5.9.0",
     "vitest": "^3.2.0"

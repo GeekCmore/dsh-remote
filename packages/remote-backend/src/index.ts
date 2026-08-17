@@ -13,6 +13,7 @@
  */
 import type { Context } from '@deepseek-ai/cordis';
 import type { SessionEvent } from '@dsh-remote/seams';
+import { randomUUID } from 'node:crypto';
 import { runServe } from './serve.js';
 import type {
   AgentHostAccess,
@@ -21,6 +22,8 @@ import type {
   CatalogHostAccess,
   CompactionHostAccess,
   HostAgent,
+  HostApprovalDecision,
+  HostApprovalRequest,
   HostQuestionAnswers,
   HostQuestionRequest,
   HostSession,
@@ -83,23 +86,12 @@ function sessionAccessFromContext(ctx: Context): SessionHostAccess {
   const store = (ctx as unknown as { sessions: unknown }).sessions as {
     get(id: string): HostSession | undefined;
     list(): HostSession[];
-    create(id?: string, options?: { meta?: { cwd?: string } }): HostSession;
     fork(source: string, boundary?: number): HostSession;
   };
   const events = ctx as unknown as EventSource;
   return {
     get: (id) => store.get(id),
     list: () => store.list(),
-    // Upstream `SessionStore.create(id?, options?)`: the id is omitted (the
-    // store mints `session-<n>`) and the protocol's cwd folds into
-    // `options.meta`; meta.cwd must be absolute (upstream validates and
-    // throws, which the broker surfaces as REMOTE_PROTOCOL_ERROR). Upstream
-    // SessionHeader has no title field, so the protocol title is dropped.
-    create: (options) =>
-      store.create(
-        undefined,
-        options.cwd !== undefined ? { meta: { cwd: options.cwd } } : undefined,
-      ),
     // Upstream `boundary` is already an inclusive event boundary, so the
     // protocol's fork-at-seq rewind (`atSeq`) maps onto it directly.
     fork: (source, boundary, atSeq) => {
@@ -115,14 +107,52 @@ function sessionAccessFromContext(ctx: Context): SessionHostAccess {
   };
 }
 
-/** Narrow `ctx.agents` (upstream `AgentRegistry`) to {@link AgentHostAccess}. */
+/**
+ * Narrow `ctx.agents` (upstream `AgentRegistry`) to {@link AgentHostAccess}.
+ * The `create` half mirrors dsh-headless's runner: `AgentRegistry.create`
+ * mints session AND agent under one caller-supplied id (the SessionId brand
+ * is compile-time-only, so a plain `session-<uuid>` string crosses the cast),
+ * and the provider/model route comes from the `agentDefaultModel` service's
+ * `currentSelection()` (probed isolate-safely — OPTIONAL in principle, but a
+ * model-less agent could never prompt, so without the service `create` is
+ * left absent and the wire `session.create` degrades to
+ * REMOTE_PROTOCOL_ERROR). A reasoningEffort on the selection is dropped:
+ * `AgentOptions` carries provider/model/maxTokens only (headless applies the
+ * effort through its scoped model-selection install, which this narrowing
+ * cannot reach without importing the host's dsh-agent package).
+ */
 function agentAccessFromContext(ctx: Context): AgentHostAccess {
   const registry = (ctx as unknown as { agents: unknown }).agents as {
     get(id: string): HostAgent | undefined;
+    create?(options: {
+      sessionId: string;
+      meta?: { cwd?: string };
+      agentOptions?: { provider?: string; model?: string };
+    }): Promise<{ agent: HostAgent }>;
   };
+  const defaultModel = probeService<{
+    currentSelection(): { provider: string; model: string; reasoningEffort?: string };
+  }>(ctx, 'agentDefaultModel');
   const events = ctx as unknown as EventSource;
   return {
     get: (id) => registry.get(id),
+    // Upstream `CreateAgentOptions.meta.cwd` must be absolute (the session
+    // boundary validates and throws, which the broker surfaces as
+    // REMOTE_PROTOCOL_ERROR). Upstream SessionHeader has no title field, so
+    // the protocol title is dropped.
+    ...(typeof registry.create === 'function' && defaultModel !== undefined
+      ? {
+          create: async (options: { cwd?: string; title?: string }) => {
+            const selection = defaultModel.currentSelection();
+            const handle = await registry.create!({
+              sessionId: `session-${randomUUID()}`,
+              ...(options.cwd !== undefined ? { meta: { cwd: options.cwd } } : {}),
+              agentOptions: { provider: selection.provider, model: selection.model },
+            });
+            return handle.agent;
+          },
+        }
+      : {}),
     onStatus: (listener) =>
       events.on('agent/status', (payload) => {
         const { agent, status } = payload as unknown as {
@@ -136,16 +166,52 @@ function agentAccessFromContext(ctx: Context): AgentHostAccess {
 
 /**
  * Narrow the host approval waterfall. Real dsh dispatches `approval/request`
- * as a waterfall (`(request, next) => decision`); the bridge awaits the
- * remote answer before resolving the waterfall.
+ * as a waterfall (`(request, next) => outcome`) whose request is the UPSTREAM
+ * shape (`{agent, toolName, callId?, reason?, signal?}` — see
+ * `@deepseek-ai/dsh-user-approval`) and whose resolution is an outcome string
+ * (`'allowed-once' | 'rejected' | 'cancelled' | 'unavailable'`). The bridge
+ * speaks the wire-facing {@link HostApprovalRequest} /
+ * {@link HostApprovalDecision} pair, so this adapter translates BOTH ways:
+ * `agent.session.id` / `toolName` / `reason` become sessionId / kind /
+ * summary on the way in, and the bridge's approve/deny becomes the outcome
+ * vocabulary on the way out — a deny whose note marks the answer channel as
+ * missing maps to `'unavailable'`, every other deny to `'rejected'`.
  */
 function approvalAccessFromContext(ctx: Context): ApprovalHostAccess {
   const events = ctx as unknown as EventSource;
+  /** Structural view of the upstream waterfall request (dsh-user-approval). */
+  interface UpstreamApprovalRequest {
+    agent?: { session?: { id: unknown } };
+    toolName?: string;
+    callId?: string;
+    reason?: string;
+  }
+  const toHostRequest = (req: UpstreamApprovalRequest): HostApprovalRequest => ({
+    ...(req.agent?.session?.id !== undefined
+      ? { sessionId: String(req.agent.session.id) }
+      : {}),
+    kind: req.toolName ?? 'unknown',
+    summary: req.reason ?? '',
+    ...(req.callId !== undefined ? { detail: { callId: req.callId } } : {}),
+  });
+  const toOutcome = (decision: HostApprovalDecision): string =>
+    decision.decision === 'approve'
+      ? 'allowed-once'
+      : decision.note !== undefined && decision.note.includes('unavailable')
+        ? 'unavailable'
+        : 'rejected';
+  const toDecision = (outcome: unknown): HostApprovalDecision =>
+    outcome === 'allowed-once'
+      ? { decision: 'approve' }
+      : { decision: 'deny', note: `delegated host outcome: ${String(outcome)}` };
   return {
     onApprovalRequest: (handler) =>
       events.on(
         'approval/request',
-        handler as (...args: never[]) => void,
+        ((req: UpstreamApprovalRequest, next: () => Promise<unknown>) =>
+          handler(toHostRequest(req), async () => toDecision(await next())).then(toOutcome)) as (
+          ...args: never[]
+        ) => void,
       ),
   };
 }

@@ -7,7 +7,7 @@ import {
   encodeLine,
   type MuxChannel,
 } from '../src/index.js';
-import { BytePipe, pipePair, tick } from './util.js';
+import { BytePipe, pipePair, tick } from '@dsh-remote/test-utils';
 
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();

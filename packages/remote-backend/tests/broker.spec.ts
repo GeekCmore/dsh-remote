@@ -13,10 +13,46 @@ import {
 
 function makeBroker() {
   const sessions = new FakeSessionHost();
-  const agents = new FakeAgentHost();
+  const agents = new FakeAgentHost(sessions);
   const broker = new SessionBroker(sessions, agents);
   return { sessions, agents, broker };
 }
+
+describe('SessionBroker session.create', () => {
+  it('mints session AND live agent together; the session is immediately attachable and promptable', async () => {
+    const { sessions, agents, broker } = makeBroker();
+    const { conn } = fakeConnection('a');
+    broker.connect(conn);
+
+    const { sessionId } = await broker.create('a', { cwd: '/build' });
+    expect(sessions.get(sessionId)).toBeDefined();
+    expect(sessions.get(sessionId)?.header.cwd).toBe('/build');
+    expect(agents.get(sessionId)).toBeDefined();
+
+    broker.attach('a', { sessionId, mode: 'write' });
+    const { messageId } = await broker.prompt('a', sessionId, 'hello');
+    expect(messageId).toMatch(/^remote-/);
+    expect(agents.agents.get(sessionId)!.prompts).toHaveLength(1);
+    // And the new session is listed as a live, idle session.
+    const summary = (await broker.list()).find((s) => s.sessionId === sessionId)!;
+    expect(summary).toMatchObject({ status: 'idle', cwd: '/build' });
+  });
+
+  it('degrades to REMOTE_PROTOCOL_ERROR when the host has no agents.create', async () => {
+    const sessions = new FakeSessionHost();
+    const broker = new SessionBroker(sessions, { get: () => undefined });
+    const { conn } = fakeConnection('a');
+    broker.connect(conn);
+    const err = await expectRemoteError(broker.create('a', {}), 'REMOTE_PROTOCOL_ERROR');
+    expect(err.message).toContain('does not support session creation');
+    expect(sessions.list()).toHaveLength(0);
+  });
+
+  it('requires a known connection', async () => {
+    const { broker } = makeBroker();
+    await expectRemoteError(broker.create('ghost', {}), 'REMOTE_PROTOCOL_ERROR');
+  });
+});
 
 describe('SessionBroker session.list', () => {
   it('lists live and cold sessions with status/attached/controller', async () => {
@@ -340,5 +376,20 @@ describe('broker over the wire', () => {
       Promise.resolve().then(() => world.broker.attach('other', { sessionId: 's1', mode: 'write' })),
       'REMOTE_SESSION_LOCKED',
     );
+  });
+
+  it('session.create over the wire mints a promptable session (live agent included)', async () => {
+    const world = makeWorld();
+    await handshake(world.client, TEST_TOKEN);
+
+    const created = (await world.client.call(Methods.SessionCreate, { cwd: '/build' })) as {
+      sessionId: string;
+    };
+    expect(world.sessions.get(created.sessionId)).toBeDefined();
+    expect(world.agents.get(created.sessionId)).toBeDefined();
+
+    await world.client.call(Methods.SessionAttach, { sessionId: created.sessionId, mode: 'write' });
+    await world.client.call(Methods.SessionPrompt, { sessionId: created.sessionId, text: 'hi' });
+    expect(world.agents.agents.get(created.sessionId)!.prompts).toHaveLength(1);
   });
 });

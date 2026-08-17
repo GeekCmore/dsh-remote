@@ -1,7 +1,16 @@
 /**
- * In-memory bidirectional byte-stream plumbing for tests (same pattern as
- * @dsh-remote/core's tests/util.ts): a BytePipe is an AsyncIterable that
- * yields whatever another party pushes into it.
+ * In-memory bidirectional byte-stream plumbing for tests, shared across the
+ * workspace (previously copied between `remote-core/tests/util.ts`,
+ * `remote-backend/tests/util.ts` and the `byte-pipe.ts` files of
+ * remote-client / remote-daemon / remote-proxy). A BytePipe is an
+ * AsyncIterable that yields whatever another party pushes into it; pairing
+ * two pipes gives both ends of a connection without touching the network,
+ * SSH, or the filesystem.
+ *
+ * This package intentionally has NO workspace dependencies: every dsh-remote
+ * package (including the `@dsh-remote/core` / `@dsh-remote/backend` leaves)
+ * consumes it from tests, so a dependency back would create a workspace
+ * dependency cycle and break the topological `pnpm -r build` order.
  */
 
 /** One direction of an in-memory byte stream. */
@@ -31,6 +40,11 @@ export class BytePipe implements AsyncIterable<Uint8Array> {
       this.#waiter = null;
       waiter({ value: undefined, done: true });
     }
+  }
+
+  /** Whether end-of-stream was signalled (additive; the older copies lacked it). */
+  get ended(): boolean {
+    return this.#ended;
   }
 
   async *[Symbol.asyncIterator](): AsyncGenerator<Uint8Array> {
@@ -63,4 +77,20 @@ export function tick(): Promise<void> {
 /** Sleep `ms` (real timers). */
 export function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/** Decode captured output lines back into parsed messages. */
+export function decodeLines(lines: Uint8Array[]): unknown[] {
+  const text = new TextDecoder().decode(
+    lines.reduce((acc, l) => {
+      const merged = new Uint8Array(acc.length + l.length);
+      merged.set(acc);
+      merged.set(l, acc.length);
+      return merged;
+    }, new Uint8Array(0)),
+  );
+  return text
+    .split('\n')
+    .filter((line) => line.trim() !== '')
+    .map((line) => JSON.parse(line));
 }

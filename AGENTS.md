@@ -57,6 +57,14 @@ pnpm smoke:dsh-daemon      # e2e/dsh-daemon/run-smoke.sh; needs docker + npm reg
   dsh + `@dsh-remote/backend` onto it (`dsh-remote-backend init` +
   `serve --profile`), and attaches from a real local host with the
   bundle-daemon-tui seam swap, asserting create/history/fork over the wire.
+  LLM-gated leg: with `DSH_SMOKE_LLM_KEY` (falling back to `DEEPSEEK_API_KEY`)
+  the deploy injects the key into the container's `$DSH_HOME/.credentials.yaml`
+  (the model call runs on the remote host) and the smoke additionally runs a
+  real prompt round trip plus the remote→local approval bridge (`llm=ok` on
+  the OK line; SKIP line and green without a key). Wire `session.create` mints
+  the remote session AND its live agent together (broker routes it to
+  `ctx.agents.create`, the upstream creation contract), so wire-created
+  sessions are promptable.
 
 ## Package layout (`packages/*`)
 
@@ -75,6 +83,8 @@ pnpm smoke:dsh-daemon      # e2e/dsh-daemon/run-smoke.sh; needs docker + npm reg
 | `remote-frontend` | `@dsh-remote/remote-frontend` | transfer/preview (`ctx.remoteTransfer`), monitor (`ctx.remoteMonitor`), `remote_copy` model tool |
 | `remote-backend` | `@dsh-remote/backend` | daemon-side Cordis plugin (broker, approval + question bridges, lease, monitor, transfer, history/compact/catalog endpoints) + `dsh-remote-backend` CLI (`init` issues the pairing token; `serve --profile <name>` boots the profile in-process) |
 | `bundle-live` / `bundle-daemon` / `bundle-daemon-tui` | `@dsh-remote/bundle-*` | dsh profile bundles — composition only, `cordis.patch.yml`, no code |
+| `test-utils` | `@dsh-remote/test-utils` | test-only, **not published**: shared BytePipe/pipePair/tick/sleep/decodeLines plumbing; zero workspace dependencies so even the leaf packages' tests can consume it without a dependency cycle |
+| `test-fakes` | `@dsh-remote/test-fakes` | test-only, **not published**: shared daemon-protocol fakes (FakeBackendBroker, FakeTargetConnector, FakeRemoteHub, e2e host fakes, BackendRig/RigRemoteHub over the real BackendServer); consumed only by remote-client/remote-daemon/remote-proxy tests |
 
 Note the npm-name mismatches: `remote-core` → `@dsh-remote/core`,
 `remote-sessions` → `@dsh-remote/sessions`, `remote-backend` → `@dsh-remote/backend`.
@@ -86,6 +96,13 @@ client types; `remote-daemon` binds the client to cordis;
 `remote-proxy` consumes the client to re-provide the official session seams;
 `fs-ssh`/`subprocess-ssh`/`remote-frontend` consume hub + seams;
 `remote-backend` consumes `core` + `seams`; bundles compose providers.
+Test-only packages sit outside the runtime graph: `test-utils` depends on
+nothing in-workspace (consumable by every package's tests), while
+`test-fakes` depends on `core`/`remote`/`seams`/`backend` + `test-utils` and
+is consumed only by `remote-client`/`remote-daemon`/`remote-proxy` tests —
+`remote-backend`'s own tests must NOT consume it (cycle: test-fakes imports
+`@dsh-remote/backend`). pnpm only warns on cyclic workspace dependencies and
+stops guaranteeing build order, so keep the test packages acyclic.
 `@deepseek-ai/cordis` is a peer dependency everywhere (supplied by the dsh
 host); `remote-proxy` additionally peers on the upstream `dsh-session` /
 `dsh-agent` / `dsh-session-persistence` / `dsh-user-approval` /
@@ -105,11 +122,19 @@ frontends consuming the official dsh seams are supported.
   sourcemaps on), tests in `tests/` run by vitest (`tests/**/*.spec.ts`,
   20s timeout). `remote-backend` typechecks tests too via `tsconfig.test.json`.
 - Public contract changes (e.g. `packages/remote/src/transport.ts`) must keep
-  backward compatibility and update the fakes under `packages/*/tests`
-  (`fake-transport.ts`, `fake-hub.ts`, `fake-backend.ts`, `fake-ssh2.ts`).
+  backward compatibility and update the fakes: the shared ones live in
+  `packages/test-fakes/src` (`fake-backend.ts`, `fake-connector.ts`,
+  `fake-hub.ts`, `host-fakes.ts`, `real-backend-hub.ts`,
+  `backend-transport.ts`) and `packages/test-utils/src` (byte plumbing); the
+  provider-specific simulators stay package-local (`fake-transport.ts` in
+  fs-ssh/subprocess-ssh/remote-frontend, `fake-ssh2.ts` in remote-ssh), and
+  `remote-backend/tests/fakes.ts` keeps its private superset of the host
+  fakes (cycle constraint — see the dependency-flow note above).
 - Real-stack e2e tests live next to unit tests: `remote-daemon/tests/e2e`
-  runs the real frontend stack against the real `BackendServer` over in-memory
-  byte pipes; `fs-ssh`/`subprocess-ssh` `tests/integration` run against the
+  (and `remote-proxy/tests/e2e`) run the real frontend stack against the real
+  `BackendServer` over in-memory byte pipes, via the `BackendRig`/
+  `RigRemoteHub` wiring shared from `@dsh-remote/test-fakes`;
+  `fs-ssh`/`subprocess-ssh` `tests/integration` run against the
   sshd container and skip cleanly without `DSH_TEST_SSH_HOST`.
 - Bundle patches (`packages/bundle-*/cordis.patch.yml`) are id-targeted
   against `@deepseek-ai/dsh-base` rows: a patch replaces a row's whole

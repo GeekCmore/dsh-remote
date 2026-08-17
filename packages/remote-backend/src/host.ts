@@ -19,7 +19,11 @@
  * - Session: `id: SessionId` (branded string), `header: SessionHeader`
  *   (`cwd?`, `createdAt`, …), `events: readonly SessionEvent[]`,
  *   `seq: number` (next seq = log length).
- * - AgentRegistry (`ctx.agents`): `get(id): Agent | undefined`, `list()`;
+ * - AgentRegistry (`ctx.agents`): `get(id): Agent | undefined`, `list()`,
+ *   `create(options: CreateAgentOptions): Promise<AgentHandle>` (mints the
+ *   session AND the agent under one caller-supplied `options.sessionId`;
+ *   `options.meta.cwd` is the validated-absolute session cwd;
+ *   `options.agentOptions` carries the provider/model route);
  *   status feed via `ctx.on('agent/status', ({agent, status}) => …)`.
  * - Agent: `id`, `status: 'idle' | 'running'`,
  *   `followup(message: UserMessage): void`,
@@ -78,18 +82,6 @@ export interface SessionHostAccess {
    */
   fork(source: string, boundary?: number, atSeq?: number): HostSession;
   /**
-   * Create a fresh live session, narrowed from upstream
-   * `SessionStore.create(id?, options?)`: the id is omitted (the store mints
-   * it) and the protocol's `{cwd, title}` fold into `options.meta` —
-   * `meta.cwd` must be an ABSOLUTE path (upstream validates and throws).
-   * Upstream `SessionHeader` has no title field, so a protocol title is
-   * silently dropped (the wire contract explicitly allows hosts without
-   * title support to do so). OPTIONAL: not every host supports ad-hoc
-   * session creation; when absent the backend answers `session.create` with
-   * REMOTE_PROTOCOL_ERROR.
-   */
-  create?(options: { cwd?: string; title?: string }): HostSession;
-  /**
    * Subscribe to the post-commit append feed (upstream
    * `ctx.on('session/event', …)`). Returns an unsubscribe disposer.
    */
@@ -143,6 +135,27 @@ export interface AgentHostAccess {
   /** Upstream `AgentRegistry.get`. */
   get(id: string): HostAgent | undefined;
   /**
+   * Upstream `AgentRegistry.create(options: CreateAgentOptions)`: mint a
+   * session AND its live agent together under one shared id. This is the only
+   * upstream creation path that yields a promptable session — a bare
+   * `SessionStore.create` produces a session no agent can attach to
+   * afterwards (the factory's `SessionStore.prepare(id)` throws on an
+   * existing id), which is exactly why the broker routes the wire
+   * `session.create` here, not to the session store. Resolves with the new
+   * live agent; its `id` IS the session id. Async like upstream (setup +
+   * publication settle before the handle resolves).
+   *
+   * The protocol's `{cwd, title}` fold into `options.meta` upstream —
+   * `meta.cwd` must be an ABSOLUTE path (upstream validates and throws).
+   * Upstream `SessionHeader` has no title field, so a protocol title is
+   * silently dropped (the wire contract explicitly allows hosts without
+   * title support to do so). OPTIONAL: not every host supports ad-hoc
+   * session creation (e.g. one without an agent-factory/default-model
+   * stack); when absent the backend answers `session.create` with
+   * REMOTE_PROTOCOL_ERROR.
+   */
+  create?(options: { cwd?: string; title?: string }): Promise<HostAgent>;
+  /**
    * Subscribe to agent status transitions (upstream
    * `ctx.on('agent/status', ({ agent, status }) => …)`). Optional.
    */
@@ -150,9 +163,12 @@ export interface AgentHostAccess {
 }
 
 /**
- * One approval request raised by the host's tool layer. In real dsh this
- * arrives through the `approval/request` waterfall (`ctx.on('approval/request',
- * (request, next) => …)`); the fields are the wire-facing subset.
+ * One approval request raised by the host's tool layer. In real dsh the
+ * waterfall carries the UPSTREAM request (`{agent, toolName, callId?,
+ * reason?, signal?}` from `@deepseek-ai/dsh-user-approval`) and resolves to
+ * an outcome string; index.ts adapts both directions, so the bridge only
+ * ever sees the wire-facing shape below (sessionId from `agent.session.id`,
+ * kind from `toolName`, summary from `reason`).
  */
 export interface HostApprovalRequest {
   /** Session the action belongs to, when the host attributes one. */
@@ -165,7 +181,9 @@ export interface HostApprovalRequest {
   detail?: unknown;
 }
 
-/** The decision the waterfall handler returns to the host. */
+/** The decision the bridge returns for one request; index.ts maps it back to
+ * the upstream outcome vocabulary (`approve` → `'allowed-once'`; a deny whose
+ * note marks the channel missing → `'unavailable'`, else `'rejected'`). */
 export interface HostApprovalDecision {
   decision: 'approve' | 'deny';
   /** Optional user note recorded with the decision. */

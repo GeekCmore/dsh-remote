@@ -25,16 +25,36 @@
 # The local execution world (fs-sandbox, subprocess, sandboxes) is left
 # untouched: in daemon mode execution happens inside the remote host, never
 # rerouted from the local process. Rows that merely INJECT sessions/agents
-# (session-title, session-query, subagent, …) also stay — the proxy
-# re-provides the same service keys, remote-backed. One exception:
-# `agent-loop` does not merely inject — it registers itself as THE agent
-# factory on ctx.agents, so it must be disabled (see below).
+# (session-query, subagent, …) also stay — the proxy re-provides the same
+# service keys, remote-backed. Two exceptions: `agent-loop` does not merely
+# inject — it registers itself as THE agent factory on ctx.agents, so it must
+# be disabled (see below); and the session-title rows actively APPEND to
+# sessions in reaction to `session/event` (a deferred fallback `session/title`
+# on the first user/message), which is a local-only append on a mirrored
+# session and breaks the mirror's seq-exactness (the mirror freezes on the
+# next wire event). Titles are generated on the REMOTE host in daemon mode —
+# its `session/title` events arrive over the wire — so the local generators
+# are disabled.
 
 # dsh-base row `session` (@deepseek-ai/dsh-session): the local ctx.sessions
 # store. Disabled; remote-proxy takes over the `sessions` service key with a
 # remote-backed implementation.
 - id: session
   name: '@deepseek-ai/dsh-session'
+  disabled: true
+
+# dsh-base rows `session-title` (@deepseek-ai/dsh-session-title) and
+# `session-title-llm` (@deepseek-ai/dsh-session-title-first-prompt-llm): the
+# LOCAL title generators. Disabled (see the header note): they append
+# local-only `session/title` events to mirrored sessions and corrupt the
+# mirror's seq-exact log. The remote host's own title events mirror over the
+# wire, so no title functionality is lost.
+- id: session-title
+  name: '@deepseek-ai/dsh-session-title'
+  disabled: true
+
+- id: session-title-llm
+  name: '@deepseek-ai/dsh-session-title-first-prompt-llm'
   disabled: true
 
 # dsh-base row `agent` (@deepseek-ai/dsh-agent): the local ctx.agents

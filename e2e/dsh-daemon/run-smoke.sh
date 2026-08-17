@@ -13,16 +13,24 @@
 #      out the remote profile $DSH_HOME/profiles/daemon (dsh-base +
 #      dsh-app-boot from npm), npm-install it, and `dsh-remote-backend init`
 #      for the pairing token (deploy_remote()),
-#   5. create a scratch DSH_HOME with a `smoke-daemon` profile layered on
-#      @deepseek-ai/dsh-base only (no headless runner → no LLM key needed),
-#      and install the tarballs into it (the way `dsh plugin` does),
-#   6. boot `dsh --profile smoke-daemon --patch smoke.patch.yml` — the overlay
+#   5. OPTIONAL: when an LLM key is present (DSH_SMOKE_LLM_KEY, falling back
+#      to DEEPSEEK_API_KEY), inject it into the container's managed credential
+#      store ($DSH_HOME/.credentials.yaml) — daemon mode runs the model call
+#      on the REMOTE host, so the key must live there; the smoke plugin then
+#      exercises a real prompt + approval-bridge round trip and the OK line
+#      gains `llm=ok`. With no key the LLM leg prints one SKIP line. The key
+#      travels over ssh stdin only: never argv, never a log line, never
+#      smoke.out,
+#   6. create a scratch DSH_HOME with a `smoke-daemon` profile layered on
+#      @deepseek-ai/dsh-base only (no headless runner → no LOCAL LLM key
+#      needed), and install the tarballs into it (the way `dsh plugin` does),
+#   7. boot `dsh --profile smoke-daemon --patch smoke.patch.yml` — the overlay
 #      swaps the sessions/agents/sessionPersistence rows for the remote-proxy
 #      implementations (bundle-daemon-tui rows, key-auth adaptation) and
 #      mounts smoke-plugin.mjs, which asserts the mounted services, lists /
 #      creates / reads / forks a session on the remote daemon, prints
 #      DSH_REMOTE_DAEMON_SMOKE OK and exits 0,
-#   7. grep the marker line to decide success.
+#   8. grep the marker line to decide success.
 #
 # Caches the dsh CLI install under .cache/; `run-smoke.sh clean` removes all
 # generated state and stops the container. Requires: docker, node, npm, pnpm,
@@ -159,6 +167,21 @@ REMOTE
 DSH_REMOTE_TOKEN="$(deploy_remote)"
 [ -n "$DSH_REMOTE_TOKEN" ] || { log "deploy_remote() yielded an empty pairing token"; exit 1; }
 
+# --- 4b. optional remote LLM credential ---------------------------------------
+# Daemon mode places the model call on the REMOTE host, so the key must be in
+# the container's own credential store — dsh-llm-deepseek's default
+# `apiKeyEnv: DEEPSEEK_API_KEY` reference resolves through the managed
+# $DSH_HOME/.credentials.yaml (the inherited remote environment wins but has
+# no key). Piped over ssh stdin with umask 077: the key never touches argv,
+# the script text, a log line, or smoke.out. No key → the smoke's LLM leg
+# SKIPs (smoke-plugin.mjs applies the same DSH_SMOKE_LLM_KEY →
+# DEEPSEEK_API_KEY precedence to decide).
+if [ -n "${DSH_SMOKE_LLM_KEY:-${DEEPSEEK_API_KEY:-}}" ]; then
+  log "injecting the LLM credential into the container's .credentials.yaml"
+  printf 'DEEPSEEK_API_KEY: %s\n' "${DSH_SMOKE_LLM_KEY:-${DEEPSEEK_API_KEY:-}}" | "${SSH[@]}" \
+    'umask 077; mkdir -p "$HOME/.dsh" && cat > "$HOME/.dsh/.credentials.yaml"' >&2
+fi
+
 # --- 5. scratch DSH_HOME + smoke-daemon profile -------------------------------
 rm -rf "$DSH_HOME"
 mkdir -p "$PROFILE_DIR"
@@ -213,7 +236,7 @@ set +e
 DSH_HOME="$DSH_HOME" DSH_TELEMETRY_DISABLED=1 \
   DSH_REMOTE_TOKEN="$DSH_REMOTE_TOKEN" \
   DSH_REMOTE_HOST=127.0.0.1 DSH_REMOTE_PORT=10023 DSH_REMOTE_USER=dsh \
-  timeout 300 "$DSH" --profile "$PROFILE" --patch "$E2E/smoke.patch.yml" >"$OUT" 2>&1
+  timeout 600 "$DSH" --profile "$PROFILE" --patch "$E2E/smoke.patch.yml" >"$OUT" 2>&1
 code=$?
 set -e
 

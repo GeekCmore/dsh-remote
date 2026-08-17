@@ -6,7 +6,7 @@ import {
   handshake,
   makeWorld,
 } from './fakes.js';
-import { tick } from './util.js';
+import { tick } from '@dsh-remote/test-utils';
 
 async function attachedWorld(options: { compaction?: FakeCompaction } = {}) {
   const world = makeWorld(options);

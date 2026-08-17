@@ -4,7 +4,7 @@ import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { Methods, type TransferOpenResult } from '@dsh-remote/core';
 import { TEST_TOKEN, expectRemoteError, handshake, makeWorld } from './fakes.js';
-import { sleep } from './util.js';
+import { sleep } from '@dsh-remote/test-utils';
 
 async function waitFor(cond: () => Promise<boolean>, timeoutMs = 3_000): Promise<void> {
   const deadline = Date.now() + timeoutMs;

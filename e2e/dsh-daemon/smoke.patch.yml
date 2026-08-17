@@ -47,6 +47,20 @@
   name: '@deepseek-ai/dsh-agent-loop'
   disabled: true
 
+# dsh-base rows `session-title` / `session-title-llm`: the LOCAL title
+# generators. Disabled in daemon mode (bundle row sync): they append
+# local-only `session/title` events in reaction to mirrored `session/event`s,
+# which corrupts the mirror's seq-exact log (the mirror freezes on the next
+# wire event). The remote host generates titles itself; its session/title
+# events arrive over the wire.
+- id: session-title
+  name: '@deepseek-ai/dsh-session-title'
+  disabled: true
+
+- id: session-title-llm
+  name: '@deepseek-ai/dsh-session-title-first-prompt-llm'
+  disabled: true
+
 - insert:
     # Connection owner (ssh2). Smoke adaptation (a): key auth + DSH_TEST_SSH_*
     # env (the bundle ships `auth: { type: agent }` and DSH_REMOTE_* env).

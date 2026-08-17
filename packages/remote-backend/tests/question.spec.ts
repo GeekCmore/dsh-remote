@@ -16,7 +16,7 @@ import {
   handshake,
   makeWorld,
 } from './fakes.js';
-import { tick } from './util.js';
+import { tick } from '@dsh-remote/test-utils';
 
 const ITEMS = [
   {

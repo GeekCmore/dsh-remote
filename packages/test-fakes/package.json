@@ -1,8 +1,8 @@
 {
-  "name": "@dsh-remote/remote-daemon",
+  "name": "@dsh-remote/test-fakes",
   "version": "0.0.0",
   "private": true,
-  "description": "ctx.remoteSessions provider speaking the dsh-remote daemon protocol over an SSH exec channel — daemon-mode frontend",
+  "description": "Shared in-memory fakes for dsh-remote daemon-protocol tests (FakeBackendBroker, FakeTargetConnector, FakeRemoteHub, e2e host fakes and the real-BackendServer rig); not published",
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
@@ -12,31 +12,24 @@
       "default": "./dist/index.js"
     }
   },
-  "files": [
-    "dist"
-  ],
+  "files": ["dist"],
   "scripts": {
     "build": "tsc -p tsconfig.json",
-    "typecheck": "tsc -p tsconfig.json --noEmit",
-    "test": "vitest run"
+    "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {
-    "@dsh-remote/client": "workspace:*",
+    "@dsh-remote/backend": "workspace:*",
     "@dsh-remote/core": "workspace:*",
     "@dsh-remote/remote": "workspace:*",
     "@dsh-remote/seams": "workspace:*",
-    "@dsh-remote/sessions": "workspace:*"
+    "@dsh-remote/test-utils": "workspace:*"
   },
   "peerDependencies": {
     "@deepseek-ai/cordis": "^4.0.1"
   },
   "devDependencies": {
     "@deepseek-ai/cordis": "^4.0.1",
-    "@dsh-remote/backend": "workspace:*",
-    "@dsh-remote/test-fakes": "workspace:*",
-    "@dsh-remote/test-utils": "workspace:*",
     "@types/node": "^24.0.0",
-    "typescript": "^5.9.0",
-    "vitest": "^3.2.0"
+    "typescript": "^5.9.0"
   }
 }

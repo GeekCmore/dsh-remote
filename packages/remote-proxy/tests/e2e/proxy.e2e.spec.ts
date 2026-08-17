@@ -16,7 +16,7 @@ import type { ApprovalOutcome, ApprovalRequest } from '@deepseek-ai/dsh-user-app
 import { DaemonRemoteSessions } from '@dsh-remote/remote-daemon';
 import type { SessionEvent } from '@dsh-remote/seams';
 import RemoteProxyPlugin from '../../src/index.js';
-import { BackendRig, E2E_TOKEN, RigRemoteHub } from './real-backend-hub.js';
+import { BackendRig, E2E_TOKEN, RigRemoteHub } from '@dsh-remote/test-fakes';
 
 const REF = 'tok-ref';
 

@@ -44,7 +44,11 @@ replayed into a real upstream `Session` *before* it enters the store, so the
 local seq numbers are identical to the remote ones and no `session/event`
 flood is published during replay. Live events then append through the
 genuine store hooks. A seq violation (gap, duplicate, failed append) freezes
-the mirror (`mirror.failed`) rather than corrupting the local log. Wire
+the mirror (`mirror.failed`) rather than corrupting the local log. The
+mirror's log is owned by the remote host: `session.append` on a mirrored
+session is shadowed so only the mirror itself may write — a local append
+(e.g. the local session-title fallback reacting to a replayed
+`user/message`) throws instead of silently diverging the seq line. Wire
 events that carry no `surfaceOp` are appended with the default `'append'`
 intent; `time` / `ignorable` metadata is not preserved across the wire.
 

@@ -1,11 +1,17 @@
 /**
- * In-memory fakes of the remote-backend host structural interfaces, COPIED
- * from `packages/remote-backend/tests/fakes.ts` (that file is test-private
- * and not exported from the package; keep the two in sync when the host
- * interfaces change). Only the pieces the e2e harness needs are carried over:
- * FakeSessionHost / FakeAgentHost / FakeApprovalHost + the protocol v2
- * subsystems (FakePersistence / FakeQuestionHost / FakeCatalogs /
- * FakeCompaction / FakeAttachments) + deterministic monitor sources.
+ * In-memory fakes of the remote-backend host structural interfaces, covering
+ * the pieces the e2e harness needs: FakeSessionHost / FakeAgentHost /
+ * FakeApprovalHost + the protocol v2 subsystems (FakePersistence /
+ * FakeQuestionHost / FakeCatalogs / FakeCompaction / FakeAttachments) +
+ * deterministic monitor sources.
+ *
+ * Moved from `packages/remote-daemon/tests/e2e/fakes.ts` (remote-proxy carried
+ * a byte-identical copy). `packages/remote-backend/tests/fakes.ts` still holds
+ * its own SUPERSET of these classes (plus `makeWorld`/handshake helpers wired
+ * to backend internals): remote-backend's tests cannot import this package
+ * without closing a workspace dependency cycle, since this file imports
+ * `@dsh-remote/backend` types. Keep the two in sync when the host interfaces
+ * change.
  */
 import type { SessionEvent } from '@dsh-remote/seams';
 import type {
@@ -60,7 +66,12 @@ export class FakeSessionHost implements SessionHostAccess {
     return session;
   }
 
-  /** `session.create` backing: mint an id and register a fresh session. */
+  /**
+   * Mint-and-register a fresh session. Shared id-minter for
+   * {@link FakeAgentHost.create} (upstream mints session and agent under one
+   * id); the broker no longer calls this directly — wire `session.create`
+   * routes through the agent host.
+   */
   create(options: { cwd?: string; title?: string } = {}): FakeSession {
     const id = `created-${this.sessions.size + 1}`;
     const session = new FakeSession(id, {
@@ -149,10 +160,27 @@ export class FakeAgentHost implements AgentHostAccess {
   readonly agents = new Map<string, FakeAgent>();
   #statusListeners: ((agent: HostAgent, status: 'idle' | 'running') => void)[] = [];
 
+  /**
+   * @param sessionHost - link to the companion FakeSessionHost so
+   *   {@link create} can mint the session side too (upstream's contract: one
+   *   `agents.create` publishes BOTH). Optional; without it create still
+   *   mints the agent, with a standalone id.
+   */
+  constructor(private readonly sessionHost?: FakeSessionHost) {}
+
   add(id: string): FakeAgent {
     const agent = new FakeAgent(id);
     this.agents.set(id, agent);
     return agent;
+  }
+
+  /**
+   * `AgentRegistry.create` backing: mint a fresh session AND its live agent
+   * under one shared id, so the created session is immediately promptable.
+   */
+  async create(options: { cwd?: string; title?: string } = {}): Promise<FakeAgent> {
+    const session = this.sessionHost?.create(options);
+    return this.add(session?.id ?? `created-${this.agents.size + 1}`);
   }
 
   setStatus(id: string, status: 'idle' | 'running'): void {

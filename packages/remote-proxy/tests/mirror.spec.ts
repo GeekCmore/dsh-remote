@@ -98,11 +98,37 @@ describe('session mirroring', () => {
     const session = s.ctx.sessions.get(SessionId('s-1'))!;
     const mirror = s.proxy.mirrors.get('s-1')!;
 
-    // Forge a gap by appending a local-only event behind the mirror's back.
-    session.append('todo/write', { todos: [] });
+    // Forge a wire-side gap: push a phantom event into the fake's log without
+    // notifying, so the next emitted event's seq jumps past the mirror's.
+    const fakeSessions = (s.broker as unknown as { sessions: Map<string, { events: unknown[] }> }).sessions;
+    fakeSessions.get('s-1')!.events.push({ type: 'todo/write', seq: 0, time: 0, data: { todos: [] } });
     s.broker.emit('s-1', 'turn/start', { turn: 1 });
     await vi.waitFor(() => expect(mirror.failed).toBeDefined());
     expect(mirror.failed!.message).toContain('breaks the mirror');
+  });
+
+  it('rejects local appends to a mirrored session (the remote host owns the log)', async () => {
+    const s = track(await setupProxy());
+    s.broker.createSession({});
+    await s.proxy.ready;
+    await s.proxy.reconcile();
+    await vi.waitFor(() => expect(s.ctx.sessions.get(SessionId('s-1'))).toBeDefined());
+    const session = s.ctx.sessions.get(SessionId('s-1'))!;
+    const mirror = s.proxy.mirrors.get('s-1')!;
+
+    // The stock dsh-base hazard: a local reactor (session-title's fallback)
+    // answering a mirrored user/message with a local session/title append.
+    expect(() => session.append('session/title', { title: 'local' })).toThrow(/remote mirror/);
+    expect(session.events).toHaveLength(0);
+    expect(mirror.failed).toBeUndefined();
+
+    // The mirror itself is unaffected: the next wire event still appends.
+    const events: SessionEvent[] = [];
+    s.ctx.on('session/event', (_session, event) => events.push(event as SessionEvent));
+    s.broker.emit('s-1', 'turn/start', { turn: 1 });
+    await vi.waitFor(() => expect(session.events).toHaveLength(1));
+    expect(session.events[0]).toMatchObject({ type: 'turn/start', seq: 0 });
+    expect(mirror.failed).toBeUndefined();
   });
 
   it('sessions.create/fork reject synchronously with remote guidance', async () => {

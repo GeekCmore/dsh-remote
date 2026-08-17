@@ -1,13 +1,12 @@
 /**
  * Shared unit-test harness: a real cordis `Context` with the proxy mounted
  * over a {@link RemoteClient} talking to the in-memory {@link FakeBackendBroker}
- * (copied from `@dsh-remote/client` tests — the known twin-copy pattern).
+ * from `@dsh-remote/test-fakes`.
  */
 import { Context } from '@deepseek-ai/cordis';
 import { RemoteClient } from '@dsh-remote/client';
 import { RemoteProxy } from '../src/index.js';
-import { FakeBackendBroker } from './fake-backend.js';
-import { FakeTargetConnector } from './fake-connector.js';
+import { FakeBackendBroker, FakeTargetConnector } from '@dsh-remote/test-fakes';
 
 export const TOKEN = 'pairing-token';
 export const REF = 'tok-ref';

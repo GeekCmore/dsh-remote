@@ -6,7 +6,7 @@ import {
   type MonitorMetricsNotification,
 } from '@dsh-remote/core';
 import { TEST_TOKEN, handshake, makeWorld } from './fakes.js';
-import { sleep, tick } from './util.js';
+import { sleep, tick } from '@dsh-remote/test-utils';
 
 describe('serve over the wire: lifecycle integration', () => {
   it('routes approval.request to the writer and approval.answer back', async () => {
