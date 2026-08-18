@@ -93,6 +93,7 @@ export function installLiveRuntime(ctx: Context, config: LiveRuntimeConfig): Liv
         keepaliveIntervalMs: config.keepaliveIntervalMs ?? 0,
       },
     }],
+    hostVerifier: config.hostVerifier,
     autoConnect: false,
   })
   const fs = new SshFileSystem(ctx, {

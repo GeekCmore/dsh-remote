@@ -22,6 +22,8 @@ export interface LiveRuntimeConfig {
   keepaliveIntervalMs?: number
   defaultCwd?: string
   monitorIntervalMs?: number
+  /** Verify the SSH server host key before authentication proceeds. */
+  hostVerifier?: (fingerprint: string, hostKey: Buffer) => boolean | Promise<boolean>
 }
 
 export interface LiveMetrics {
