@@ -89,4 +89,17 @@ export interface LiveRuntime {
   subscribe(listener: () => void): () => void
 }
 
+export interface LiveRuntimeGroup {
+  readonly runtimes: readonly LiveRuntime[]
+  readonly activeTargetId: string
+  activate(targetId: string): LiveRuntime
+  get(targetId: string): LiveRuntime | undefined
+  subscribe(listener: () => void): () => void
+}
+
 export declare function installLiveRuntime(ctx: Context, config: LiveRuntimeConfig): LiveRuntime
+export declare function installLiveRuntimeGroup(
+  ctx: Context,
+  configs: readonly LiveRuntimeConfig[],
+  initialTargetId?: string,
+): LiveRuntimeGroup
