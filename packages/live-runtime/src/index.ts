@@ -14,6 +14,7 @@ import type {
   LiveMetrics,
   LiveRuntime,
   LiveRuntimeConfig,
+  LiveRuntimeGroup,
 } from '../types/index.js'
 
 export type {
@@ -29,6 +30,7 @@ export type {
   LiveMonitorHandle,
   LiveRuntime,
   LiveRuntimeConfig,
+  LiveRuntimeGroup,
 } from '../types/index.js'
 
 const OUTPUT_LIMIT_BYTES = 1024 * 1024
@@ -75,52 +77,74 @@ function requiredPassword(credentials: LiveCredentials | undefined): string {
   return credentials.password
 }
 
-export function installLiveRuntime(ctx: Context, config: LiveRuntimeConfig): LiveRuntime {
-  const targetId = config.targetId ?? 'default'
-  const registeredAuth = config.auth.type === 'password'
-    ? { type: 'password' as const, password: '' }
-    : config.auth
+export function installLiveRuntimeGroup(
+  ctx: Context,
+  configs: readonly LiveRuntimeConfig[],
+  initialTargetId?: string,
+): LiveRuntimeGroup {
+  if (configs.length === 0) throw new Error('live-runtime: at least one target is required')
+  const entries = configs.map(config => ({ config, targetId: config.targetId ?? 'default' }))
+  const ids = new Set<string>()
+  for (const entry of entries) {
+    if (ids.has(entry.targetId)) throw new Error(`live-runtime: duplicate target id: ${entry.targetId}`)
+    ids.add(entry.targetId)
+  }
+  let activeTargetId = initialTargetId ?? entries[0]!.targetId
+  if (!ids.has(activeTargetId)) throw new Error(`live-runtime: unknown initial target: ${activeTargetId}`)
+  let connectingTargetId: string | undefined
+  const configById = new Map(entries.map(entry => [entry.targetId, entry.config] as const))
   const hub = new SshRemoteHub(ctx, {
-    targets: [{
+    targets: entries.map(({ config, targetId }) => ({
       id: targetId,
       title: config.title ?? config.host,
       ssh: {
         host: config.host,
         port: config.port ?? 22,
         username: config.username,
-        auth: registeredAuth,
+        auth: config.auth.type === 'password'
+          ? { type: 'password' as const, password: '' }
+          : config.auth,
         readyTimeoutMs: config.readyTimeoutMs ?? 15_000,
         keepaliveIntervalMs: config.keepaliveIntervalMs ?? 0,
       },
-    }],
-    hostVerifier: config.hostVerifier,
+    })),
+    hostVerifier: (fingerprint, hostKey) => {
+      if (connectingTargetId === undefined) return true
+      const verifier = configById.get(connectingTargetId)?.hostVerifier
+      return verifier?.(fingerprint, hostKey) ?? true
+    },
     autoConnect: false,
   })
   const fs = new SshFileSystem(ctx, {
-    target: targetId,
-    defaultCwd: config.defaultCwd ?? '/',
+    getTransport: () => hub.get(activeTargetId),
+    defaultCwd: configById.get(activeTargetId)?.defaultCwd ?? '/',
   })
-  const subprocess = new SshSubprocessRuntime(ctx, { target: targetId })
-  const monitor = new RemoteMonitor(ctx, { intervalMs: config.monitorIntervalMs ?? 5_000 })
-  const listeners = new Set<() => void>()
-  const notify = (): void => {
-    for (const listener of listeners) listener()
+  const subprocess = new SshSubprocessRuntime(ctx, {
+    getTransport: () => hub.get(activeTargetId),
+    runtimeRoot: () => hub.runtimeRoot(activeTargetId),
+  })
+  const monitor = new RemoteMonitor(ctx, { intervalMs: entries[0]!.config.monitorIntervalMs ?? 5_000 })
+  const listeners = new Map<string, Set<() => void>>(entries.map(entry => [entry.targetId, new Set()]))
+  const groupListeners = new Set<() => void>()
+  const notify = (targetId: string): void => {
+    for (const listener of listeners.get(targetId) ?? []) listener()
+    for (const listener of groupListeners) listener()
   }
 
   ctx.on('remote/connected', (id) => {
-    if (id === targetId) notify()
+    if (ids.has(id)) notify(id)
   })
   ctx.on('remote/disconnected', (id) => {
-    if (id === targetId) notify()
+    if (ids.has(id)) notify(id)
   })
   ctx.on('remote/degraded', (id) => {
-    if (id === targetId) notify()
+    if (ids.has(id)) notify(id)
   })
   ctx.on('remote/metrics', (id) => {
-    if (id === targetId) notify()
+    if (ids.has(id)) notify(id)
   })
 
-  const runtime: LiveRuntime = {
+  const runtimes = entries.map(({ config, targetId }): LiveRuntime => ({
     targetId,
     hub,
     fs,
@@ -136,34 +160,48 @@ export function installLiveRuntime(ctx: Context, config: LiveRuntimeConfig): Liv
       return monitor.snapshot(targetId) as LiveMetrics | undefined
     },
     async connect(credentials?: LiveCredentials) {
+      if (targetId !== activeTargetId) throw new Error(`remote target ${targetId} is not active`)
       const auth = config.auth.type === 'password'
         ? { type: 'password' as const, password: requiredPassword(credentials) }
         : undefined
-      await hub.connect(targetId, auth)
+      connectingTargetId = targetId
+      try {
+        await hub.connect(targetId, auth)
+      } finally {
+        connectingTargetId = undefined
+      }
       monitor.start(targetId, { intervalMs: config.monitorIntervalMs ?? 5_000 })
-      notify()
+      notify(targetId)
     },
     async disconnect() {
       monitor.stop(targetId)
       await hub.disconnect(targetId)
-      notify()
+      notify(targetId)
     },
     async reconnect(credentials?: LiveCredentials) {
+      if (targetId !== activeTargetId) throw new Error(`remote target ${targetId} is not active`)
       const auth = config.auth.type === 'password'
         ? { type: 'password' as const, password: requiredPassword(credentials) }
         : undefined
       monitor.stop(targetId)
       await hub.disconnect(targetId)
-      await hub.connect(targetId, auth)
+      connectingTargetId = targetId
+      try {
+        await hub.connect(targetId, auth)
+      } finally {
+        connectingTargetId = undefined
+      }
       monitor.start(targetId, { intervalMs: config.monitorIntervalMs ?? 5_000 })
-      notify()
+      notify(targetId)
     },
     async exec(request) {
+      if (targetId !== activeTargetId) throw new Error(`remote target ${targetId} is not active`)
       const transport = hub.get(targetId)
       if (transport === undefined) throw new Error(`remote target ${targetId} is not connected`)
       return execTransport(transport, request)
     },
     async runCommand(request: LiveCommandRequest): Promise<LiveCommandResult> {
+      if (targetId !== activeTargetId) throw new Error(`remote target ${targetId} is not active`)
       const timeout = new AbortController()
       const timeoutMs = request.timeoutMs ?? DEFAULT_COMMAND_TIMEOUT_MS
       const timer = setTimeout(() => timeout.abort(new Error('remote command timed out')), timeoutMs)
@@ -199,14 +237,42 @@ export function installLiveRuntime(ctx: Context, config: LiveRuntimeConfig): Liv
       }
     },
     subscribe(listener) {
-      listeners.add(listener)
-      return () => listeners.delete(listener)
+      listeners.get(targetId)!.add(listener)
+      return () => listeners.get(targetId)?.delete(listener)
+    },
+  }))
+
+  const group: LiveRuntimeGroup = {
+    runtimes,
+    get activeTargetId() {
+      return activeTargetId
+    },
+    activate(targetId) {
+      const runtime = runtimes.find(candidate => candidate.targetId === targetId)
+      if (runtime === undefined) throw new Error(`live-runtime: unknown target: ${targetId}`)
+      if (targetId !== activeTargetId) {
+        activeTargetId = targetId
+        notify(targetId)
+      }
+      return runtime
+    },
+    get(targetId) {
+      return runtimes.find(runtime => runtime.targetId === targetId)
+    },
+    subscribe(listener) {
+      groupListeners.add(listener)
+      return () => groupListeners.delete(listener)
     },
   }
 
   ctx.effect(() => () => {
-    listeners.clear()
-    monitor.stop(targetId)
+    for (const targetListeners of listeners.values()) targetListeners.clear()
+    groupListeners.clear()
+    for (const { targetId } of entries) monitor.stop(targetId)
   }, 'live-runtime: clear listeners')
-  return runtime
+  return group
+}
+
+export function installLiveRuntime(ctx: Context, config: LiveRuntimeConfig): LiveRuntime {
+  return installLiveRuntimeGroup(ctx, [config]).runtimes[0]!
 }
